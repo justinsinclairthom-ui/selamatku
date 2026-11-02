@@ -21,6 +21,7 @@ const state = {
   soundOn: true,
   notificationsOn: false,
   lastQuakeIds: new Set(),
+  scannerActive: false,
 };
 
 // ── CONSTANTS ──────────────────────────────────────────────────
@@ -245,6 +246,10 @@ function notifyEarthquake(quake) {
   setStatus(isMajor ? 'danger' : 'warning',
     `Gempa M${quake.mag} terdeteksi`,
     quake.place || '');
+
+  // Auto-trigger safety scan CTA after 2s
+  selectedDisasterType = 'gempa';
+  setTimeout(() => triggerAutoScan('gempa'), 2000);
 }
 
 // ── GEO MATH ───────────────────────────────────────────────────
@@ -314,6 +319,172 @@ function initMap() {
   } else {
     requestLocation();
   }
+}
+
+// ── AI SAFETY SCANNER ────────────────────────────────────────
+let scannerStream = null;
+let selectedDisasterType = 'gempa';
+
+async function openSafetyScanner(disasterType) {
+  const overlay = document.getElementById('scanner-overlay');
+  if (!overlay) return;
+
+  // Pre-select disaster type if provided
+  if (disasterType) selectedDisasterType = disasterType;
+  updateChipSelection();
+
+  overlay.classList.remove('hidden');
+  document.getElementById('scanner-loading').classList.add('hidden');
+  document.getElementById('scanner-results').classList.add('hidden');
+
+  try {
+    scannerStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    const video = document.getElementById('scanner-video');
+    video.srcObject = scannerStream;
+    await video.play();
+    document.getElementById('scanner-status').textContent = 'Kamera aktif';
+  } catch (err) {
+    console.error('Camera error:', err);
+    document.getElementById('scanner-status').textContent = 'Kamera gagal';
+    document.getElementById('scanner-hint').textContent =
+      '⚠️ Tidak dapat mengakses kamera. Izinkan akses kamera di browser/settings.';
+    document.getElementById('btn-capture').disabled = true;
+  }
+}
+
+function closeSafetyScanner() {
+  stopCamera();
+  const overlay = document.getElementById('scanner-overlay');
+  if (overlay) overlay.classList.add('hidden');
+  state.scannerActive = false;
+}
+
+function stopCamera() {
+  if (scannerStream) {
+    scannerStream.getTracks().forEach(t => t.stop());
+    scannerStream = null;
+  }
+  const video = document.getElementById('scanner-video');
+  if (video) video.srcObject = null;
+}
+
+function updateChipSelection() {
+  document.querySelectorAll('#scanner-disaster-types .chip').forEach(chip => {
+    chip.classList.toggle('active', chip.dataset.type === selectedDisasterType);
+  });
+}
+
+function captureFrame() {
+  const video = document.getElementById('scanner-video');
+  const canvas = document.getElementById('scanner-canvas');
+  if (!video || !video.videoWidth) return null;
+
+  // Cap at 800px for smaller payload
+  const maxDim = 800;
+  let w = video.videoWidth, h = video.videoHeight;
+  if (w > maxDim || h > maxDim) {
+    const ratio = Math.min(maxDim / w, maxDim / h);
+    w = Math.round(w * ratio);
+    h = Math.round(h * ratio);
+  }
+
+  canvas.width = w;
+  canvas.height = h;
+  canvas.getContext('2d').drawImage(video, 0, 0, w, h);
+  return canvas.toDataURL('image/jpeg', 0.7);
+}
+
+async function analyzeScene(imageData) {
+  const loadingEl = document.getElementById('scanner-loading');
+  const resultsEl = document.getElementById('scanner-results');
+  loadingEl.classList.remove('hidden');
+  resultsEl.classList.add('hidden');
+
+  try {
+    const resp = await fetch('/api/analyze-safety', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image: imageData,
+        disasterType: selectedDisasterType,
+        context: state.userPos ? `Lokasi: ${state.userPos.lat.toFixed(4)}, ${state.userPos.lng.toFixed(4)}` : ''
+      })
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: 'Server error' }));
+      throw new Error(err.error || 'Gagal menganalisis');
+    }
+
+    const result = await resp.json();
+    renderSafetyResult(result);
+
+  } catch (err) {
+    loadingEl.classList.add('hidden');
+    showInAppAlert('❌ Gagal', err.message + '\n\nPastikan koneksi internet stabil dan coba lagi.');
+  }
+}
+
+function renderSafetyResult(result) {
+  const loadingEl = document.getElementById('scanner-loading');
+  const resultsEl = document.getElementById('scanner-results');
+  loadingEl.classList.add('hidden');
+  resultsEl.classList.remove('hidden');
+
+  // Risk badge
+  const badges = { safe: '✅', caution: '⚠️', danger: '🚨' };
+  document.getElementById('result-risk-badge').textContent = badges[result.riskLevel] || '⚠️';
+
+  // Summary
+  document.getElementById('result-summary').textContent = result.summary || '';
+
+  // Recommendations
+  const recsEl = document.getElementById('result-recs');
+  recsEl.innerHTML = '';
+  (result.recommendations || []).sort((a, b) => a.priority - b.priority).forEach(rec => {
+    const pClass = `p${Math.min(rec.priority, 3)}`;
+    recsEl.innerHTML += `<div class="rec-card ${pClass}">
+      <span class="rec-priority">${rec.priority}</span>
+      <div class="rec-text"><strong>${esc(rec.action)}</strong><span>📍 ${esc(rec.location)}</span></div>
+    </div>`;
+  });
+
+  // Danger zones
+  const dangersEl = document.getElementById('result-dangers');
+  const dangerList = document.getElementById('result-danger-list');
+  if (result.dangerZones && result.dangerZones.length > 0) {
+    dangersEl.classList.remove('hidden');
+    dangerList.innerHTML = result.dangerZones.map(z => `<li>${esc(z)}</li>`).join('');
+  } else {
+    dangersEl.classList.add('hidden');
+  }
+
+  // Confidence
+  const conf = result.confidence != null ? Math.round(result.confidence * 100) : null;
+  document.getElementById('result-confidence').textContent =
+    conf ? `Confidence analisis: ${conf}%` : '';
+
+  // Haptic feedback based on risk
+  if (result.riskLevel === 'danger') hapticDanger();
+  else hapticTurn();
+}
+
+function triggerAutoScan(disasterType) {
+  const banner = document.getElementById('scan-cta-banner');
+  if (!banner) return;
+  banner.classList.remove('hidden');
+  // Auto-dismiss after 15s
+  setTimeout(() => banner.classList.add('hidden'), 15000);
+}
+
+// Escape HTML helper
+function esc(str) {
+  const d = document.createElement('div');
+  d.textContent = str || '';
+  return d.innerHTML;
 }
 
 // ── LOCATION ─────────────────────────────────────────────────
@@ -1210,6 +1381,51 @@ function initEvents() {
   if (btnChangePos) btnChangePos.addEventListener('click', () => {
     hapticTap();
     showManualPosModal('Ubah koordinat posisi Anda:');
+  });
+
+  // ── AI Safety Scanner events ──
+  const btnScanSafety = document.getElementById('btn-scan-safety');
+  if (btnScanSafety) btnScanSafety.addEventListener('click', () => {
+    hapticTap();
+    state.scannerActive = true;
+    openSafetyScanner();
+  });
+
+  const btnCloseScanner = document.getElementById('btn-close-scanner');
+  if (btnCloseScanner) btnCloseScanner.addEventListener('click', closeSafetyScanner);
+
+  const btnCapture = document.getElementById('btn-capture');
+  if (btnCapture) btnCapture.addEventListener('click', () => {
+    hapticTap();
+    const frame = captureFrame();
+    if (frame) analyzeScene(frame);
+  });
+
+  const btnRescanAI = document.getElementById('btn-rescan-ai');
+  if (btnRescanAI) btnRescanAI.addEventListener('click', () => {
+    hapticTap();
+    document.getElementById('scanner-results').classList.add('hidden');
+    document.getElementById('scanner-loading').classList.add('hidden');
+  });
+
+  const btnCloseResults = document.getElementById('btn-close-results');
+  if (btnCloseResults) btnCloseResults.addEventListener('click', closeSafetyScanner);
+
+  // Disaster type chips
+  document.querySelectorAll('#scanner-disaster-types .chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      selectedDisasterType = chip.dataset.type;
+      updateChipSelection();
+    });
+  });
+
+  // Auto-scan CTA button
+  const btnAutoScan = document.getElementById('btn-auto-scan');
+  if (btnAutoScan) btnAutoScan.addEventListener('click', () => {
+    hapticTap();
+    document.getElementById('scan-cta-banner').classList.add('hidden');
+    state.scannerActive = true;
+    openSafetyScanner(selectedDisasterType);
   });
 
   // Rescan

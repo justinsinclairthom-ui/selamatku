@@ -49,6 +49,7 @@
       <div class="map-overlay">
         <button id="btn-recenter" class="fab" title="Pusatkan ke posisi saya">📍</button>
         <button id="btn-rescan" class="fab" title="Pindai ulang zona risiko">🔄</button>
+        <button id="btn-scan-safety" class="fab fab-ai" title="AI Scan Lingkungan">📷</button>
       </div>
       <div id="zone-card" class="zone-card hidden">
         <h3 id="zone-title">Zona Risiko</h3>
@@ -179,6 +180,66 @@
       </div>
     </section>
   </main>
+
+  <!-- ── AI SAFETY SCANNER OVERLAY ───────────────────────── -->
+  <div id="scanner-overlay" class="scanner-overlay hidden">
+    <video id="scanner-video" autoplay playsinline muted></video>
+    <canvas id="scanner-canvas" style="display:none"></canvas>
+
+    <!-- Top bar -->
+    <div class="scanner-topbar">
+      <button id="btn-close-scanner" class="icon-btn scanner-close">✕</button>
+      <h3>📷 AI Safety Scanner</h3>
+      <span class="scanner-badge" id="scanner-status">Kamera aktif</span>
+    </div>
+
+    <!-- Disaster type selector -->
+    <div class="scanner-chips" id="scanner-disaster-types">
+      <button class="chip active" data-type="gempa">🌍 Gempa</button>
+      <button class="chip" data-type="tsunami">🌊 Tsunami</button>
+      <button class="chip" data-type="banjir">💧 Banjir</button>
+      <button class="chip" data-type="angin">🌬️ Angin Kencang</button>
+      <button class="chip" data-type="umum">❓ Umum</button>
+    </div>
+
+    <!-- Capture button -->
+    <div class="scanner-controls">
+      <p class="scanner-hint" id="scanner-hint">Arahkan kamera ke sekitar Anda, lalu tekan tombol untuk capture</p>
+      <button id="btn-capture" class="capture-btn">
+        <span class="capture-ring"></span>
+        <span class="capture-inner">📸</span>
+      </button>
+    </div>
+
+    <!-- Loading state -->
+    <div id="scanner-loading" class="scanner-loading hidden">
+      <div class="spinner-lg"></div>
+      <p>Menganalisis lingkungan…</p>
+      <p class="loading-sub">AI sedang mencari tempat aman terdekat</p>
+    </div>
+
+    <!-- Results panel -->
+    <div id="scanner-results" class="scanner-results hidden">
+      <div class="results-header">
+        <span id="result-risk-badge" class="risk-badge">⚠️</span>
+        <h3 id="result-summary"></h3>
+        <button id="btn-rescan-ai" class="btn-secondary btn-sm">↻ Scan Lagi</button>
+      </div>
+      <div id="result-recs" class="rec-list"></div>
+      <div id="result-dangers" class="danger-zones hidden">
+        <h4>⚡ Zona Bahaya Terdeteksi:</h4>
+        <ul id="result-danger-list"></ul>
+      </div>
+      <p id="result-confidence" class="confidence-text"></p>
+      <button id="btn-close-results" class="btn-primary btn-full">Tutup & Kembali</button>
+    </div>
+  </div>
+
+  <!-- ── AUTO-SCAN CTA BANNER ─────────────────────────────── -->
+  <div id="scan-cta-banner" class="scan-cta-banner hidden">
+    <span>📷 Tekan untuk scan lingkungan & dapatkan rekomendasi berlindung</span>
+    <button id="btn-auto-scan" class="btn-primary btn-sm">Scan Sekarang</button>
+  </div>
 
   <!-- ── BOTTOM NAVIGATION ──────────────────────────────── -->
   <nav id="bottom-nav">
