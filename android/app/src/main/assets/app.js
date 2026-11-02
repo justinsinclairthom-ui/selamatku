@@ -61,20 +61,55 @@ function saveLS(key, data) {
 
 // ── AUDIO & HAPTICS ────────────────────────────────────────────
 let audioCtx = null;
-function beep(freq = 880, dur = 0.15) {
+let alarmInterval = null; // for repeating alarm
+
+function getAudioCtx() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+function beep(freq = 880, dur = 0.15, volume = 0.3) {
   if (!state.soundOn) return;
   try {
-    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
-    osc.connect(gain); gain.connect(audioCtx.destination);
+    const ctx = getAudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'square'; // more attention-grabbing
+    osc.connect(gain); gain.connect(ctx.destination);
     osc.frequency.value = freq;
-    gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
-    osc.start(); osc.stop(audioCtx.currentTime + dur);
-  } catch(e) {}
+    gain.gain.setValueAtTime(volume, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+    osc.start(); osc.stop(ctx.currentTime + dur);
+  } catch(e) { console.warn('beep error:', e); }
 }
-function alarm() { [0,200,400].forEach(d => setTimeout(() => beep(660, .2), d)); }
+
+/** Start repeating emergency alarm — plays until stopAlarm() is called */
+function startAlarm() {
+  stopAlarm(); // clear any existing
+  const playCycle = () => {
+    if (!state.soundOn) return;
+    // Siren pattern: high-low-high
+    beep(880, 0.25, 0.5);
+    setTimeout(() => beep(660, 0.25, 0.5), 300);
+    setTimeout(() => beep(880, 0.25, 0.5), 600);
+  };
+  playCycle(); // immediate first burst
+  alarmInterval = setInterval(playCycle, 2000); // repeat every 2 seconds
+}
+
+/** Stop the repeating alarm */
+function stopAlarm() {
+  if (alarmInterval) {
+    clearInterval(alarmInterval);
+    alarmInterval = null;
+  }
+}
+
+// Legacy alias
+function alarm() { startAlarm(); }
 
 function vibrate(pattern) {
   if (navigator.vibrate) navigator.vibrate(pattern);
@@ -195,6 +230,60 @@ function showInAppAlert(title, message) {
   overlay.classList.remove('hidden');
 }
 
+/** Emergency alert — persists until user explicitly dismisses.
+ *  Stops repeating alarm when closed. Used for M5+ earthquakes. */
+function showEmergencyAlert(title, message, isMajor) {
+  let overlay = document.getElementById('emergency-alert');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'emergency-alert';
+    const bgColor = isMajor ? '#dc2626' : '#d97706';
+    overlay.innerHTML = `<div class="modal-backdrop" style="background:rgba(0,0,0,.85);z-index:10001">
+      <div class="modal" style="max-height:70vh;border-top:4px solid ${bgColor};animation:pulse-border 1s infinite">
+        <div class="modal-header">
+          <h2 id="emerg-title" style="color:${bgColor}"></h2>
+        </div>
+        <div class="modal-body">
+          <p id="emerg-msg" style="font-size:14px;line-height:1.7;color:var(--clr-text-2);white-space:pre-line"></p>
+          ${isMajor ? '<p style="margin-top:12px;font-size:12px;color:#dc2626;font-weight:600">🔊 Alarm aktif — tekan TUTUP untuk mematikan</p>' : ''}
+        </div>
+        <div class="modal-footer">
+          <button class="btn-primary btn-full" id="btn-dismiss-emerg" style="${isMajor ? 'background:#dc2626' : ''}">
+            ${isMajor ? ' TUTUP & MATIKAN ALARM' : 'OK'}
+          </button>
+        </div>
+      </div>
+    </div>`;
+    document.body.appendChild(overlay);
+
+    // Inject pulse animation
+    if (!document.getElementById('pulse-border-css')) {
+      const s = document.createElement('style');
+      s.id = 'pulse-border-css';
+      s.textContent = '@keyframes pulse-border{0%,100%{box-shadow:0 0 0 0 rgba(220,38,38,.4)}50%{box-shadow:0 0 0 8px rgba(220,38,38,0)}}';
+      document.head.appendChild(s);
+    }
+  }
+
+  document.getElementById('emerg-title').textContent = title;
+  document.getElementById('emerg-msg').textContent = message;
+  overlay.classList.remove('hidden');
+  overlay.style.display = '';
+
+  // Dismiss button stops alarm
+  const dismissBtn = document.getElementById('btn-dismiss-emerg');
+  if (dismissBtn) {
+    // Remove old listeners
+    const newBtn = dismissBtn.cloneNode(true);
+    dismissBtn.parentNode.replaceChild(newBtn, dismissBtn);
+    newBtn.addEventListener('click', () => {
+      stopAlarm();
+      overlay.style.display = 'none';
+      hapticTap();
+    });
+  }
+}
+
 /** Unified earthquake alert: uses system notification if available,
  *  otherwise falls back to in-app visual + sound + vibration */
 function notifyEarthquake(quake) {
@@ -230,17 +319,17 @@ function notifyEarthquake(quake) {
     } catch(e) {}
   }
 
-  // ALWAYS show in-app alert for significant quakes
-  showInAppAlert(title, body);
-
-  // Sound + vibration always
+  // Sound: major = repeating alarm until dismissed, moderate = single beep
   if (isMajor) {
     hapticDanger();
-    alarm();
+    startAlarm(); // repeats every 2s until user dismisses
   } else {
     hapticTurn();
-    beep(880, .2);
+    beep(880, .3, 0.4);
   }
+
+  // ALWAYS show in-app alert for significant quakes (with alarm-stop on dismiss)
+  showEmergencyAlert(title, body, isMajor);
 
   // Update status banner
   setStatus(isMajor ? 'danger' : 'warning',
@@ -335,31 +424,54 @@ async function openSafetyScanner(disasterType) {
   updateChipSelection();
 
   overlay.classList.remove('hidden');
+  overlay.style.display = '';
   document.getElementById('scanner-loading').classList.add('hidden');
   document.getElementById('scanner-results').classList.add('hidden');
+  document.getElementById('scanner-status').textContent = 'Memuat kamera…';
+  document.getElementById('scanner-hint').textContent = 'Mengaktifkan kamera…';
+  const btnCap = document.getElementById('btn-capture');
+  if (btnCap) btnCap.disabled = true;
 
   try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('Browser tidak mendukung kamera. Gunakan Chrome terbaru.');
+    }
+
     scannerStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+      video: { facingMode: 'environment' },
       audio: false
     });
+
     const video = document.getElementById('scanner-video');
     video.srcObject = scannerStream;
+
+    // Wait for video to actually be ready
+    await new Promise((resolve, reject) => {
+      if (video.readyState >= 2) return resolve();
+      const timeout = setTimeout(() => reject(new Error('Kamera lambat dimuat')), 8000);
+      video.onloadeddata = () => { clearTimeout(timeout); resolve(); };
+      video.onerror = (e) => { clearTimeout(timeout); reject(new Error('Video error')); };
+    });
+
     await video.play();
-    document.getElementById('scanner-status').textContent = 'Kamera aktif';
+    document.getElementById('scanner-status').textContent = '● Kamera aktif';
+    document.getElementById('scanner-hint').textContent = 'Arahkan kamera ke sekitar Anda, lalu tekan tombol untuk capture';
+    if (btnCap) btnCap.disabled = false;
+
   } catch (err) {
-    console.error('Camera error:', err);
-    document.getElementById('scanner-status').textContent = 'Kamera gagal';
-    document.getElementById('scanner-hint').textContent =
-      '⚠️ Tidak dapat mengakses kamera. Izinkan akses kamera di browser/settings.';
-    document.getElementById('btn-capture').disabled = true;
+    console.error('[Scanner] Camera error:', err.message);
+    document.getElementById('scanner-status').textContent = '✕ Gagal';
+    document.getElementById('scanner-status').style.color = '#ef4444';
+    document.getElementById('scanner-hint').innerHTML =
+      `⚠️ ${esc(err.message)}<br><small>Penyelahan:<br>• Pastikan izin kamera sudah diberikan<br>• Tutup app lain yang memakai kamera<br>• Refresh halaman dan coba lagi</small>`;
   }
 }
 
 function closeSafetyScanner() {
+  stopAlarm(); // make sure alarm stops
   stopCamera();
   const overlay = document.getElementById('scanner-overlay');
-  if (overlay) overlay.classList.add('hidden');
+  if (overlay) { overlay.classList.add('hidden'); overlay.style.display = ''; }
   state.scannerActive = false;
 }
 
@@ -381,10 +493,19 @@ function updateChipSelection() {
 function captureFrame() {
   const video = document.getElementById('scanner-video');
   const canvas = document.getElementById('scanner-canvas');
-  if (!video || !video.videoWidth) return null;
 
-  // Cap at 800px for smaller payload
-  const maxDim = 800;
+  console.log('[Scanner] captureFrame: video exists:', !!video,
+    'readyState:', video?.readyState,
+    'videoWidth:', video?.videoWidth,
+    'videoHeight:', video?.videoHeight);
+
+  if (!video || video.readyState < 2 || !video.videoWidth) {
+    console.warn('[Scanner] Video not ready for capture');
+    return null;
+  }
+
+  // Cap at 640px for faster upload (still good enough for AI)
+  const maxDim = 640;
   let w = video.videoWidth, h = video.videoHeight;
   if (w > maxDim || h > maxDim) {
     const ratio = Math.min(maxDim / w, maxDim / h);
@@ -394,8 +515,12 @@ function captureFrame() {
 
   canvas.width = w;
   canvas.height = h;
-  canvas.getContext('2d').drawImage(video, 0, 0, w, h);
-  return canvas.toDataURL('image/jpeg', 0.7);
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, w, h);
+
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+  console.log('[Scanner] Captured frame:', w + 'x' + h, 'size:', Math.round(dataUrl.length / 1024) + 'KB');
+  return dataUrl;
 }
 
 async function analyzeScene(imageData) {
@@ -1605,6 +1730,34 @@ function initEvents() {
 
 // ── BOOT ──────────────────────────────────────────────────────
 // ── CLEAR OLD CACHES (one-time migration) ─────────────────────
+// ── DEMO MODE (for presentations) ────────────────────────────
+function demoQuake(mag) {
+  const places = ['10km Timur Jakarta', '25km Selatan Bandung', '15km Barat Surabaya', 'Pesisir Lombok'];
+  const place = places[Math.floor(Math.random() * places.length)];
+  const lat = state.userPos ? state.userPos.lat + (Math.random() - 0.5) * 2 : -6.2;
+  const lng = state.userPos ? state.userPos.lng + (Math.random() - 0.5) * 2 : 106.8;
+
+  notifyEarthquake({
+    mag: mag,
+    lat: parseFloat(lat.toFixed(4)),
+    lng: parseFloat(lng.toFixed(4)),
+    time: Date.now(),
+    place: `[DEMO] ${place}`
+  });
+}
+
+function demoTsunami() {
+  setStatus('danger', '🌊 PERINGATAN TSUNAMI [DEMO]',
+    'Gempa M7.8 di dasar laut — potensi tsunami! Evakuasi ke tempat tinggi segera.');
+  alarm();
+  hapticDanger();
+  showInAppAlert(
+    '🌊 PERINGATAN TSUNAMI',
+    '[DEMO MODE]\n\nGempa M7.8 terdeteksi di zona subduksi.\nPotensi tsunami dalam 15-30 menit.\n\nYANG HARUS DILAKUKAN:\n1. Segera menjauh dari pantai (min. 30m)\n2. Naik ke tempat tinggi (min. 15m dpl)\n3. Jauhi sungai dan muara\n4. Ikuti jalur evakuasi vertikal\n5. Bawa dokumen penting jika sempat'
+  );
+  setTimeout(() => triggerAutoScan('tsunami'), 3000);
+}
+
 async function clearOldCaches() {
   try {
     const regs = await navigator.serviceWorker.getRegistrations();

@@ -171,6 +171,16 @@
           <li>Jauhi pantai jika ada peringatan tsunami</li>
         </ol>
         <hr />
+        <h3>🧪 Demo Mode</h3>
+        <p style="font-size:.82rem;color:var(--clr-text-2);margin-bottom:10px">Untuk presentasi / testing — simulasikan bencana tanpa menunggu kejadian asli:</p>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">
+          <button class="btn-secondary btn-full" onclick="demoQuake(5.2)">🌍 Simulasi Gempa M5.2 (Sedang)</button>
+          <button class="btn-secondary btn-full" style="border-color:#ef4444;color:#ef4444" onclick="demoQuake(6.8)">🚨 Simulasi Gempa M6.8 (Besar + Alarm)</button>
+          <button class="btn-secondary btn-full" style="border-color:#f59e0b;color:#f59e0b" onclick="demoTsunami()">🌊 Simulasi Peringatan Tsunami</button>
+          <button class="btn-primary btn-full" onclick="openSafetyScanner('gempa')">📷 Buka AI Scanner Sekarang</button>
+        </div>
+        <p style="font-size:.72rem;color:var(--clr-text-3)">⚠️ Demo mode hanya untuk presentasi. Tidak memengaruhi data aktual.</p>
+        <hr />
         <h3>📱 Install Aplikasi</h3>
         <p>Untuk pengalaman terbaik, install sebagai aplikasi:</p>
         <ul class="feature-list">
