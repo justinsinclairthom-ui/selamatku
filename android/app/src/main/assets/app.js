@@ -89,8 +89,10 @@ function beep(freq = 880, dur = 0.15, volume = 0.3) {
 /** Start repeating emergency alarm — plays until stopAlarm() is called */
 function startAlarm() {
   stopAlarm(); // clear any existing
+  showStopAlarmButton();
+
   const playCycle = () => {
-    if (!state.soundOn) return;
+    if (!state.soundOn || !alarmInterval) return;
     // Siren pattern: high-low-high
     beep(880, 0.25, 0.5);
     setTimeout(() => beep(660, 0.25, 0.5), 300);
@@ -106,6 +108,42 @@ function stopAlarm() {
     clearInterval(alarmInterval);
     alarmInterval = null;
   }
+  hideStopAlarmButton();
+}
+
+/** Floating STOP button visible whenever alarm is active */
+function showStopAlarmButton() {
+  let btn = document.getElementById('floating-stop-alarm');
+  if (!btn) {
+    btn = document.createElement('button');
+    btn.id = 'floating-stop-alarm';
+    btn.innerHTML = '🔇 MATIKAN ALARM';
+    btn.style.cssText = `
+      position:fixed; bottom:calc(var(--nav-h,60px) + env(safe-area-inset-bottom) + 16px);
+      left:50%; transform:translateX(-50%); z-index:99999;
+      padding:14px 28px; border-radius:30px; border:none;
+      background:#dc2626; color:#fff; font-size:.9rem; font-weight:700;
+      box-shadow:0 4px 20px rgba(220,38,38,.5); cursor:pointer;
+      animation:pulse-btn 1s infinite;
+    `;
+    if (!document.getElementById('pulse-btn-css')) {
+      const s = document.createElement('style');
+      s.id = 'pulse-btn-css';
+      s.textContent = '@keyframes pulse-btn{0%,100%{transform:translateX(-50%) scale(1)}50%{transform:translateX(-50%) scale(1.05)}}';
+      document.head.appendChild(s);
+    }
+    btn.addEventListener('click', () => {
+      stopAlarm();
+      hapticTap();
+    });
+    document.body.appendChild(btn);
+  }
+  btn.style.display = '';
+}
+
+function hideStopAlarmButton() {
+  const btn = document.getElementById('floating-stop-alarm');
+  if (btn) btn.style.display = 'none';
 }
 
 // Legacy alias
@@ -1749,11 +1787,12 @@ function demoQuake(mag) {
 function demoTsunami() {
   setStatus('danger', '🌊 PERINGATAN TSUNAMI [DEMO]',
     'Gempa M7.8 di dasar laut — potensi tsunami! Evakuasi ke tempat tinggi segera.');
-  alarm();
+  startAlarm();
   hapticDanger();
-  showInAppAlert(
-    '🌊 PERINGATAN TSUNAMI',
-    '[DEMO MODE]\n\nGempa M7.8 terdeteksi di zona subduksi.\nPotensi tsunami dalam 15-30 menit.\n\nYANG HARUS DILAKUKAN:\n1. Segera menjauh dari pantai (min. 30m)\n2. Naik ke tempat tinggi (min. 15m dpl)\n3. Jauhi sungai dan muara\n4. Ikuti jalur evakuasi vertikal\n5. Bawa dokumen penting jika sempat'
+  showEmergencyAlert(
+    '🌊 PERINGATAN TSUNAMI [DEMO]',
+    'Gempa M7.8 terdeteksi di zona subduksi.\nPotensi tsunami dalam 15-30 menit.\n\nYANG HARUS DILAKUKAN:\n1. Segera menjauh dari pantai (min. 30m)\n2. Naik ke tempat tinggi (min. 15m dpl)\n3. Jauhi sungai dan muara\n4. Ikuti jalur evakuasi vertikal\n5. Bawa dokumen penting jika sempat\n\n⚠️ Alarm akan berbunyi hingga Anda menekan TUTUP.',
+    true
   );
   setTimeout(() => triggerAutoScan('tsunami'), 3000);
 }

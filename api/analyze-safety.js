@@ -4,59 +4,141 @@
  * Body: { image: base64String, disasterType: string, context?: string }
  * Returns: { riskLevel, summary, recommendations[], dangerZones[], confidence }
  *
- * Uses DashScope (ModelScope/Alibaba) Qwen-VL via OpenAI-compatible API
- * Env: DASHSCOPE_API_KEY (get from modelscope.cn → Profile → Access Token)
+ * Strategy:
+ * 1. Try DashScope Qwen-VL (if DASHSCOPE_API_KEY set with sk-... format)
+ * 2. Fallback: Rule-based analysis (always works, no API key needed)
  */
 
-const API_KEY = process.env.DASHSCOPE_API_KEY || process.env.ANTHROPIC_API_KEY;
-const API_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
+const API_KEY = process.env.DASHSCOPE_API_KEY || '';
+const DASHSCOPE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
 const MODEL = 'qwen-vl-max';
 
-// Simple in-memory rate limiter
+// Rate limiter
 const rateLimits = new Map();
-const RATE_LIMIT = 15; // requests per minute
-const WINDOW_MS = 60000;
-
 function checkRateLimit(req) {
   const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 'unknown';
   const now = Date.now();
   if (!rateLimits.has(ip)) rateLimits.set(ip, []);
-  const entries = rateLimits.get(ip).filter(t => now - t < WINDOW_MS);
-  if (entries.length >= RATE_LIMIT) return false;
+  const entries = rateLimits.get(ip).filter(t => now - t < 60000);
+  if (entries.length >= 15) return false;
   entries.push(now);
   rateLimits.set(ip, entries);
   return true;
 }
 
-const SYSTEM_PROMPT = `Kamu adalah analis keselamatan darurat spesialis bencana alam Indonesia. Analisis gambar dari kamera pengguna dan berikan rekomendasi berlindung yang spesifik dan actionable.
+// ── RULE-BASED FALLBACK (always works) ────────────────────────
+function ruleBasedAnalysis(disasterType) {
+  const rules = {
+    gempa: {
+      riskLevel: 'danger',
+      summary: 'Gempa terdeteksi! Segera lindungi diri Anda.',
+      recommendations: [
+        { action: 'BERHENTI, LINDUNGI, BERPEGANGAN (Drop-Cover-Hold)', location: 'Di bawah meja/kursi kuat di dekat Anda', priority: 1 },
+        { action: 'Jauhi jendela, lemari tinggi, dan lampu gantung', location: 'Pindah ke area terbuka di ruangan', priority: 1 },
+        { action: 'Lindungi kepala dengan tangan/bantal', location: 'Posisi Anda sekarang', priority: 2 },
+        { action: 'Setelah goncangan berhenti, keluar melalui jalur evakuasi', location: 'Pintu keluar terdekat', priority: 3 }
+      ],
+      dangerZones: ['Jendela kaca', 'Lemari/gudang tinggi', 'Lampu gantung', 'Rak buku', 'Benda berat yang tergantung'],
+      confidence: 0.7
+    },
+    tsunami: {
+      riskLevel: 'danger',
+      summary: 'PERINGATAN TSUNAMI! Evakuasi segera ke tempat tinggi!',
+      recommendations: [
+        { action: 'SEGERA pergi ke tempat tinggi (min. 15m dpl atau 30m dari pantai)', location: 'Bukit/bangunan tinggi terdekat', priority: 1 },
+        { action: 'Jauhi pantai, sungai, dan muara', location: 'Arah内陆/jauh dari air', priority: 1 },
+        { action: 'Jangan gunakan kendaraan jika macet — jalan kaki lebih cepat', location: 'Jalur evakuasi vertikal', priority: 2 },
+        { action: 'Bawa dokumen penting & HP jika sempat (maks 1 menit)', location: 'Tas/ransel Anda', priority: 3 }
+      ],
+      dangerZones: ['Pantai & tepian air', 'Sungai & muara', 'Area rendah/depressed', 'Jembatan dekat air'],
+      confidence: 0.8
+    },
+    banjir: {
+      riskLevel: 'caution',
+      summary: 'Waspada banjir! Cari tempat yang lebih tinggi.',
+      recommendations: [
+        { action: 'Pindah ke lantai atas atau tempat tinggi', location: 'Lantai 2+ / atap / bukit', priority: 1 },
+        { action: 'Matikan listrik di panel utama jika air sudah masuk', location: 'Panel listrik rumah', priority: 1 },
+        { action: 'Jangan berjalan/mengendarai melewati genangan air', location: 'Hindari jalan tergenang', priority: 2 },
+        { action: 'Siapkan tas darurat: obat, air, dokumen, powerbank', location: 'Tempat mudah dijangkau', priority: 3 }
+      ],
+      dangerZones: ['Genangan air (potensi arus bawah)', 'Kolam listrik/pascn', 'Area rendah', 'Bawah jembatan'],
+      confidence: 0.7
+    },
+    angin: {
+      riskLevel: 'caution',
+      summary: 'Angin kencang! Cari perlindungan interior.',
+      recommendations: [
+        { action: 'Masuk ke ruangan interior (tanpa jendela)', location: 'Ruangan tengah bangunan / lorong', priority: 1 },
+        { action: 'Jauhi jendela, pintu kaca, dan area dengan reklame', location: 'Dinding dalam tanpa kaca', priority: 1 },
+        { action: 'Tunduk rendah, lindungi kepala', location: 'Di bawah meja/bangku kokoh', priority: 2 },
+        { action: 'Jika outdoor dan tidak ada bangunan, berbaring face-down di parit/turunan', location: 'Area rendah terbuka', priority: 3 }
+      ],
+      dangerZones: ['Jendela & kaca', 'Papan reklame/spanduk', 'Pohon besar', 'Bangunan reyot', 'Tiang listrik'],
+      confidence: 0.7
+    },
+    umum: {
+      riskLevel: 'caution',
+      summary: 'Kondisi darurat terdeteksi. Tetap tenang dan cari tempat aman.',
+      recommendations: [
+        { action: 'Tetap tenang, amati lingkungan sekitar', location: 'Posisi Anda sekarang', priority: 1 },
+        { action: 'Cari jalur keluar terdekat yang aman', location: 'Pintu keluar / exit', priority: 1 },
+        { action: 'Lindungi kepala dari benda jatuh', location: 'Di bawah meja/benda kokoh', priority: 2 },
+        { action: 'Ikuti instruksi petugas darurat', location: '-', priority: 3 }
+      ],
+      dangerZones: ['Benda yang bisa jatuh', 'Jalan rusak', 'Area kerumunan'],
+      confidence: 0.5
+    }
+  };
 
-Balas HANYA dalam format JSON valid (tanpa markdown, tanpa code fence) dengan struktur persis:
-{
-  "riskLevel": "safe" | "caution" | "danger",
-  "summary": "Satu kalimat Bahasa Indonesia tentang kondisi keselamatan",
-  "recommendations": [
-    { "action": "Apa yang harus dilakukan (Bahasa Indonesia)", "location": "Di mana (Bahasa Indonesia)", "priority": 1 },
-    { "action": "...", "location": "...", "priority": 2 }
-  ],
-  "dangerZones": ["Deskripsi bahaya terlihat di gambar (Bahasa Indonesia)"],
-  "confidence": 0.85
+  return rules[disasterType] || rules.umum;
 }
 
-Aturan:
-- SEMUA teks user-facing WAJIB Bahasa Indonesia
-- Priority 1 = tindakan SEGERA, 2 = penting, 3 = baik diketahui
-- Maksimum 4 rekomendasi, urutkan by priority
-- confidence: 0.0-1.0 (rendah jika gambar gelap/blur)
+// ── AI ANALYSIS (if valid API key) ────────────────────────────
+async function aiAnalysis(imageDataUrl, disasterType, context) {
+  const systemPrompt = `Kamu adalah analis keselamatan darurat Indonesia. Analisis gambar dan berikan rekomendasi berlindung untuk bencana: ${disasterType.toUpperCase()}.
+Balas HANYA JSON valid: {"riskLevel":"safe|caution|danger","summary":"...Bahasa Indonesia...","recommendations":[{"action":"...","location":"...","priority":1}],"dangerZones":["..."],"confidence":0.8}`;
 
-Panduan per jenis bencana:
-- GEMPA: Drop-Cover-Hold. Jauhi jendela, lemari tinggi, lampu gantung. Cari meja/tiang kuat. Outdoor: jauhi bangunan, tiang listrik, pohon.
-- TSUNAMI: Ke tempat tinggi (min 30m dari pantai atau 15m dpl). Jauhi sungai/muara/pantai. Ikuti jalur evakuasi.
-- BANJIR: Ke lantai atas/tempat tinggi. Jauhi listrik/genangan. Jangan jalan di air mengalir.
-- ANGIN KENCANG: Ruangan interior tanpa jendela. Jauhi kaca/reklame/pohon. Berbaring rendah jika perlu.
-- UMUM: Jauhi puing/debu. Gunakan jalur keluar terdekat. Lindungi kepala.`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 25000);
 
+  const resp = await fetch(DASHSCOPE_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${API_KEY}`
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: 800,
+      temperature: 0.3,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: [
+          { type: 'image_url', image_url: { url: imageDataUrl } },
+          { type: 'text', text: `Analisis lingkungan ini untuk bencana ${disasterType}. Berikan rekomendasi spesifik berdasarkan apa yang terlihat di gambar.${context ? ' Konteks: ' + context : ''}` }
+        ]}
+      ]
+    }),
+    signal: controller.signal
+  });
+
+  clearTimeout(timeout);
+
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => '');
+    throw new Error(`API ${resp.status}: ${errText.substring(0, 100)}`);
+  }
+
+  const data = await resp.json();
+  const text = data.choices?.[0]?.message?.content || '';
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error('Invalid AI response');
+  return JSON.parse(jsonMatch[0]);
+}
+
+// ── HANDLER ───────────────────────────────────────────────────
 export default async function handler(req, res) {
-  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -64,127 +146,49 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  // Rate limit
   if (!checkRateLimit(req)) {
-    return res.status(429).json({ error: 'Terlalu banyak permintaan. Coba lagi dalam 1 menit.' });
+    return res.status(429).json({ error: 'Terlalu banyak permintaan. Tunggu 1 menit.' });
   }
 
-  // Validate input
   const { image, disasterType, context } = req.body || {};
-  if (!image) return res.status(400).json({ error: 'Image is required' });
   if (!disasterType) return res.status(400).json({ error: 'disasterType is required' });
 
-  if (!API_KEY) {
-    return res.status(500).json({ error: 'Server belum dikonfigurasi. Set DASHSCOPE_API_KEY di Vercel environment variables.' });
-  }
+  let result;
+  let usedAI = false;
 
-  try {
-    // Parse base64 image — support both raw base64 and data URL
-    let imageDataUrl = image;
-    if (!image.startsWith('data:')) {
-      imageDataUrl = `data:image/jpeg;base64,${image}`;
-    }
+  // Try AI first if we have a valid-looking key (sk-... for DashScope)
+  const hasValidKey = API_KEY.startsWith('sk-');
 
-    const requestBody = {
-      model: MODEL,
-      max_tokens: 1024,
-      temperature: 0.3,
-      messages: [
-        {
-          role: 'system',
-          content: SYSTEM_PROMPT
-        },
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'image_url',
-              image_url: { url: imageDataUrl }
-            },
-            {
-              type: 'text',
-              text: `Analisis gambar ini. Jenis bencana saat ini: ${disasterType.toUpperCase()}.${context ? ' Konteks: ' + context : ''}\n\nBerikan rekomendasi berlindung berdasarkan apa yang kamu lihat.`
-            }
-          ]
-        }
-      ]
-    };
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 35000);
-
-    const apiRes = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${API_KEY}`
-      },
-      body: JSON.stringify(requestBody),
-      signal: controller.signal
-    });
-
-    clearTimeout(timeout);
-
-    if (!apiRes.ok) {
-      const errBody = await apiRes.text().catch(() => '');
-      console.error('DashScope API error:', apiRes.status, errBody.substring(0, 500));
-
-      // Try to extract useful error message
-      let errMsg = 'AI service sedang tidak tersedia. Coba lagi.';
-      try {
-        const parsed = JSON.parse(errBody);
-        if (parsed.error?.message) errMsg = parsed.error.message;
-        else if (parsed.message) errMsg = parsed.message;
-      } catch(e) {}
-
-      if (apiRes.status === 401) errMsg = 'API key tidak valid. Periksa konfigurasi server.';
-      if (apiRes.status === 429) errMsg = 'Limit API tercapai. Tunggu sebentar lalu coba lagi.';
-
-      return res.status(502).json({ error: errMsg });
-    }
-
-    const data = await apiRes.json();
-    const text = data.choices?.[0]?.message?.content || '';
-
-    console.log('[AI Response]', text.substring(0, 200));
-
-    // Parse JSON from response
-    let result;
+  if (image && hasValidKey) {
     try {
-      // Handle potential markdown wrapping or extra text
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      result = JSON.parse(jsonMatch ? jsonMatch[0] : text);
-    } catch (e) {
-      console.warn('JSON parse failed, using fallback');
-      result = {
-        riskLevel: 'caution',
-        summary: text.substring(0, 200) || 'Analisis tidak dapat diproses. Ikuti instruksi petugas.',
-        recommendations: [
-          { action: 'Tetap tenang dan cari tempat aman terdekat', location: 'Lokasi Anda sekarang', priority: 1 },
-          { action: 'Lindungi kepala dengan benda di sekitar', location: '-', priority: 2 },
-          { action: 'Ikuti instruksi petugas darurat', location: '-', priority: 3 }
-        ],
-        dangerZones: [],
-        confidence: 0.3
-      };
+      let imageDataUrl = image.startsWith('data:') ? image : `data:image/jpeg;base64,${image}`;
+      console.log('[API] Trying AI analysis with DashScope...');
+      result = await aiAnalysis(imageDataUrl, disasterType, context);
+      usedAI = true;
+      console.log('[API] AI analysis successful');
+    } catch (err) {
+      console.warn('[API] AI failed, falling back to rules:', err.message);
     }
-
-    // Ensure required fields exist
-    if (!result.riskLevel) result.riskLevel = 'caution';
-    if (!Array.isArray(result.recommendations)) result.recommendations = [];
-    if (!Array.isArray(result.dangerZones)) result.dangerZones = [];
-    if (result.confidence == null) result.confidence = 0.5;
-
-    res.setHeader('Content-Type', 'application/json');
-    res.status(200).json(result);
-
-  } catch (err) {
-    if (err.name === 'AbortError') {
-      return res.status(504).json({ error: 'Analisis melebihi waktu (35 detik). Coba lagi.' });
-    }
-    console.error('Handler error:', err.message);
-    res.status(500).json({ error: 'Terjadi kesalahan server. Coba lagi.' });
   }
+
+  // Fallback: rule-based (always works)
+  if (!result) {
+    result = ruleBasedAnalysis(disasterType);
+    if (!usedAI) {
+      result.summary = '[Mode Offline] ' + result.summary;
+      result.confidence = Math.min(result.confidence, 0.6);
+    }
+  }
+
+  // Ensure structure
+  if (!result.riskLevel) result.riskLevel = 'caution';
+  if (!Array.isArray(result.recommendations)) result.recommendations = [];
+  if (!Array.isArray(result.dangerZones)) result.dangerZones = [];
+  if (result.confidence == null) result.confidence = 0.5;
+  result.source = usedAI ? 'ai' : 'rule-based';
+
+  res.setHeader('Content-Type', 'application/json');
+  res.status(200).json(result);
 }
 
-export const config = { maxDuration: 40 };
+export const config = { maxDuration: 30 };
