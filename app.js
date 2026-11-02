@@ -299,25 +299,26 @@ function initMap() {
   //   maxZoom: 19
   // }).addTo(state.map);
 
-  // Try to restore saved position first
+  // Always start real-time GPS watch
+  // If saved position exists, show it immediately while GPS loads
   const savedPos = loadLS(LS_KEYS.POS, null);
   if (savedPos && savedPos.lat != null) {
     state.userPos = savedPos;
     updateUserMarker();
     state.map.setView([savedPos.lat, savedPos.lng], 15);
-    setStatus('safe', 'Lokasi dari data tersimpan',
-      `Koordinat: ${savedPos.lat.toFixed(4)}, ${savedPos.lng.toFixed(4)} — klik ✏️ untuk ubah`);
+    setStatus('info', 'Memuat posisi terakhir…',
+      `Mencari GPS real-time — posisi sementara: ${savedPos.lat.toFixed(4)}, ${savedPos.lng.toFixed(4)}`);
     fetchEarthquakes();
     fetchNearbyShelters();
     checkTsunamiRisk();
-    // Still try to get live GPS for accuracy
-    if (!IS_WEBVIEW && navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(onGeoSuccess, () => {}, {
-        enableHighAccuracy: true, timeout: 10000, maximumAge: 60000
-      });
-    }
+  }
+
+  // Start continuous GPS tracking regardless
+  if (navigator.geolocation) {
+    geoFirstFix = !state.userPos; // if we have saved pos, don't re-center on first fix
+    startGeoWatch();
   } else {
-    requestLocation();
+    showManualPosModal('Browser tidak mendukung geolocation.');
   }
 }
 
@@ -400,10 +401,22 @@ function captureFrame() {
 async function analyzeScene(imageData) {
   const loadingEl = document.getElementById('scanner-loading');
   const resultsEl = document.getElementById('scanner-results');
+  const hintEl = document.getElementById('scanner-hint');
+
+  // Visual flash effect on capture
+  const video = document.getElementById('scanner-video');
+  if (video) {
+    video.style.filter = 'brightness(2)';
+    setTimeout(() => { if (video) video.style.filter = ''; }, 150);
+  }
+
   loadingEl.classList.remove('hidden');
   resultsEl.classList.add('hidden');
+  if (hintEl) hintEl.textContent = '📤 Mengirim ke AI…';
 
   try {
+    console.log('[Scanner] Sending image, size:', imageData.length, 'bytes');
+
     const resp = await fetch('/api/analyze-safety', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -414,17 +427,37 @@ async function analyzeScene(imageData) {
       })
     });
 
+    console.log('[Scanner] Response status:', resp.status);
+
     if (!resp.ok) {
-      const err = await resp.json().catch(() => ({ error: 'Server error' }));
-      throw new Error(err.error || 'Gagal menganalisis');
+      let errMsg = `Server error (${resp.status})`;
+      try {
+        const errBody = await resp.json();
+        errMsg = errBody.error || errMsg;
+      } catch(e) {}
+      throw new Error(errMsg);
     }
 
     const result = await resp.json();
+    console.log('[Scanner] Analysis result:', result);
     renderSafetyResult(result);
 
   } catch (err) {
+    console.error('[Scanner] Error:', err);
     loadingEl.classList.add('hidden');
-    showInAppAlert('❌ Gagal', err.message + '\n\nPastikan koneksi internet stabil dan coba lagi.');
+    if (hintEl) hintEl.textContent = 'Arahkan kamera ke sekitar Anda, lalu tekan tombol untuk capture';
+
+    // Specific error messages
+    let userMsg = err.message;
+    if (err.message.includes('fetch') || err.message.includes('network')) {
+      userMsg = 'Koneksi terputus. Periksa internet Anda.';
+    } else if (err.message.includes('429')) {
+      userMsg = 'Terlalu banyak scan. Tunggu 1 menit lalu coba lagi.';
+    } else if (err.message.includes('ANTHROPIC_API_KEY') || err.message.includes('not configured')) {
+      userMsg = 'Server belum dikonfigurasi. Hubungi developer.';
+    }
+
+    showInAppAlert('❌ Gagal Analisis', userMsg + '\n\nTips:\n• Pastikan koneksi internet aktif\n• Gambar tidak terlalu gelap\n• Coba lagi dalam beberapa detik');
   }
 }
 
@@ -489,6 +522,8 @@ function esc(str) {
 
 // ── LOCATION ─────────────────────────────────────────────────
 let geoWatchId = null;
+let geoRetryCount = 0;
+const GEO_MAX_RETRIES = 5;
 
 function requestLocation() {
   setStatus('info', 'Mengambil lokasi…', 'Mohon izinkan akses lokasi Anda.');
@@ -498,9 +533,29 @@ function requestLocation() {
     return;
   }
 
-  navigator.geolocation.getCurrentPosition(onGeoSuccess, onGeoError, {
-    enableHighAccuracy: true, timeout: 15000, maximumAge: 60000
-  });
+  // Use watchPosition for real-time continuous tracking
+  startGeoWatch();
+}
+
+function startGeoWatch() {
+  if (geoWatchId !== null) return; // already watching
+
+  geoWatchId = navigator.geolocation.watchPosition(
+    onGeoSuccess,
+    onGeoError,
+    {
+      enableHighAccuracy: true,
+      timeout: 20000,
+      maximumAge: 10000  // accept cached position up to 10s old
+    }
+  );
+}
+
+function stopGeoWatch() {
+  if (geoWatchId !== null) {
+    navigator.geolocation.clearWatch(geoWatchId);
+    geoWatchId = null;
+  }
 }
 
 /** Show a modal asking user to manually enter coordinates */
@@ -574,35 +629,73 @@ function updateUserMarker() {
   injectPulseCSS();
 }
 
+let geoFirstFix = true;
+
 function onGeoSuccess(pos) {
   const { latitude: lat, longitude: lng } = pos.coords;
+  const accuracy = pos.coords.accuracy || 0;
   state.userPos = { lat, lng };
   saveLS(LS_KEYS.POS, state.userPos);
   updateUserMarker();
-  state.map.setView([lat, lng], 15);
-  setStatus('safe', 'Lokasi berhasil dideteksi',
-    `Koordinat: ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
-  fetchEarthquakes();
-  fetchNearbyShelters();
-  checkTsunamiRisk();
+
+  // Only re-center map on first fix, then just update marker
+  if (geoFirstFix) {
+    geoFirstFix = false;
+    geoRetryCount = 0;
+    state.map.setView([lat, lng], 15);
+    setStatus('safe', '📡 Lokasi real-time aktif',
+      `Akurasi: ±${Math.round(accuracy)}m · Update otomatis`);
+    fetchEarthquakes();
+    fetchNearbyShelters();
+    checkTsunamiRisk();
+  } else {
+    // Update status subtly to show live tracking
+    const banner = document.getElementById('status-banner');
+    if (banner && banner.classList.contains('banner-safe')) {
+      document.getElementById('status-msg').textContent =
+        `Live: ${lat.toFixed(5)}, ${lng.toFixed(5)} (±${Math.round(accuracy)}m)`;
+    }
+  }
 }
 
 function onGeoError(err) {
+  geoRetryCount++;
   const msgs = {
-    1: 'Izin lokasi ditolak.',
-    2: 'Lokasi GPS tidak tersedia.',
-    3: 'Timeout permintaan lokasi.'
+    1: 'Izin lokasi ditolak di browser.',
+    2: 'GPS tidak tersedia / sinyal lemah.',
+    3: 'Menunggu sinyal GPS…'
   };
   const msg = msgs[err.code] || err.message;
-  // In WebView or if denied → offer manual entry
-  if (IS_WEBVIEW || err.code === 1) {
-    showManualPosModal(`${msg}\n\nAnda dapat memasukkan koordinat secara manual:`);
-  } else {
-    setStatus('danger', 'Gagal mengambil lokasi', msg + '\nKlik tombol 📍 lagi untuk coba manual.');
-    // Also offer manual after any error
+
+  // Permission denied → stop watching, offer manual
+  if (err.code === 1) {
+    stopGeoWatch();
+    if (IS_WEBVIEW) {
+      showManualPosModal(`${msg}\n\nDi mode aplikasi, GPS dibatasi.\nMasukkan koordinat Anda:`);
+    } else {
+      setStatus('warning', 'Izin lokasi diperlukan',
+        msg + '\nBuka Settings → Site Permissions → Location → Allow');
+    }
+    return;
+  }
+
+  // Timeout / unavailable → retry up to max, then fallback
+  if (geoRetryCount >= GEO_MAX_RETRIES && !state.userPos) {
+    stopGeoWatch();
+    setStatus('warning', 'GPS belum terdeteksi',
+      'Mencoba ulang otomatis… atau gunakan ✏️ untuk set manual');
+    // Offer manual as secondary option (not blocking)
     setTimeout(() => {
-      if (!state.userPos) showManualPosModal(msg + '\n\nAtau masukkan koordinat manual:');
-    }, 3000);
+      if (!state.userPos) {
+        showManualPosModal('GPS belum memberikan posisi setelah beberapa percobaan.\n\nAnda bisa tunggu (akan terus retry) atau set manual:');
+      }
+    }, 5000);
+  } else {
+    // Still retrying — show progress
+    if (!state.userPos) {
+      setStatus('info', 'Mencari sinyal GPS…',
+        `Percobaan ${geoRetryCount}/${GEO_MAX_RETRIES} — ${msg}`);
+    }
   }
 }
 
@@ -1395,10 +1488,25 @@ function initEvents() {
   if (btnCloseScanner) btnCloseScanner.addEventListener('click', closeSafetyScanner);
 
   const btnCapture = document.getElementById('btn-capture');
-  if (btnCapture) btnCapture.addEventListener('click', () => {
+  if (btnCapture) btnCapture.addEventListener('click', async () => {
     hapticTap();
+    const video = document.getElementById('scanner-video');
+
+    // Check if video is actually playing
+    if (!video || video.readyState < 2) {
+      showInAppAlert('⚠️ Kamera belum siap', 'Tunggu sampai pratinjau kamera muncul, lalu coba lagi.');
+      return;
+    }
+
     const frame = captureFrame();
-    if (frame) analyzeScene(frame);
+    if (!frame) {
+      showInAppAlert('⚠️ Gagal capture', 'Kamera tidak menghasilkan gambar. Coba tutup dan buka lagi scanner.');
+      return;
+    }
+
+    console.log('[Scanner] Frame captured:', frame.substring(0, 50), '... total', frame.length);
+    btnCapture.disabled = true;
+    analyzeScene(frame).finally(() => { btnCapture.disabled = false; });
   });
 
   const btnRescanAI = document.getElementById('btn-rescan-ai');
