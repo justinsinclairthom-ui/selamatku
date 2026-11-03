@@ -4,14 +4,13 @@
  * Body: { image: base64String, disasterType: string, context?: string }
  * Returns: { riskLevel, summary, recommendations[], dangerZones[], confidence }
  *
- * Strategy:
- * 1. Try DashScope Qwen-VL (if DASHSCOPE_API_KEY set with sk-... format)
- * 2. Fallback: Rule-based analysis (always works, no API key needed)
+ * Backend: Groq Cloud (Llama Vision) — free tier 14,400 req/hari
+ * Env: GROQ_API_KEY
  */
 
-const API_KEY = process.env.DASHSCOPE_API_KEY || '';
-const DASHSCOPE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
-const MODEL = 'qwen-vl-max';
+const API_KEY = process.env.GROQ_API_KEY || '';
+const API_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const MODEL = 'llama-3.2-11b-vision-preview';
 
 // Rate limiter
 const rateLimits = new Map();
@@ -26,7 +25,7 @@ function checkRateLimit(req) {
   return true;
 }
 
-// ── RULE-BASED FALLBACK (always works) ────────────────────────
+// ── RULE-BASED FALLBACK (always works, no API needed) ─────────
 function ruleBasedAnalysis(disasterType) {
   const rules = {
     gempa: {
@@ -46,7 +45,7 @@ function ruleBasedAnalysis(disasterType) {
       summary: 'PERINGATAN TSUNAMI! Evakuasi segera ke tempat tinggi!',
       recommendations: [
         { action: 'SEGERA pergi ke tempat tinggi (min. 15m dpl atau 30m dari pantai)', location: 'Bukit/bangunan tinggi terdekat', priority: 1 },
-        { action: 'Jauhi pantai, sungai, dan muara', location: 'Arah内陆/jauh dari air', priority: 1 },
+        { action: 'Jauhi pantai, sungai, dan muara', location: 'Arah jauh dari air', priority: 1 },
         { action: 'Jangan gunakan kendaraan jika macet — jalan kaki lebih cepat', location: 'Jalur evakuasi vertikal', priority: 2 },
         { action: 'Bawa dokumen penting & HP jika sempat (maks 1 menit)', location: 'Tas/ransel Anda', priority: 3 }
       ],
@@ -90,19 +89,26 @@ function ruleBasedAnalysis(disasterType) {
       confidence: 0.5
     }
   };
-
   return rules[disasterType] || rules.umum;
 }
 
-// ── AI ANALYSIS (if valid API key) ────────────────────────────
+// ── AI ANALYSIS via Groq (Llama Vision) ───────────────────────
 async function aiAnalysis(imageDataUrl, disasterType, context) {
-  const systemPrompt = `Kamu adalah analis keselamatan darurat Indonesia. Analisis gambar dan berikan rekomendasi berlindung untuk bencana: ${disasterType.toUpperCase()}.
-Balas HANYA JSON valid: {"riskLevel":"safe|caution|danger","summary":"...Bahasa Indonesia...","recommendations":[{"action":"...","location":"...","priority":1}],"dangerZones":["..."],"confidence":0.8}`;
+  const systemPrompt = `Kamu adalah analis keselamatan darurat Indonesia. Analisis gambar lingkungan pengguna dan berikan rekomendasi berlindung spesifik untuk bencana: ${disasterType.toUpperCase()}.
+
+Balas HANYA dalam format JSON valid (tanpa markdown, tanpa penjelasan tambahan):
+{"riskLevel":"safe|caution|danger","summary":"Satu kalimat Bahasa Indonesia","recommendations":[{"action":"Apa yang harus dilakukan","location":"Di mana","priority":1}],"dangerZones":["Bahaya yang terlihat di gambar"],"confidence":0.85}
+
+Aturan:
+- Semua teks dalam Bahasa Indonesia
+- Maksimum 4 rekomendasi, priority 1=paling urgent
+- Berbasis apa yang KAMU LIHAT di gambar (meja, jendela, pintu, ruang terbuka, dll)
+- confidence 0.0-1.0 (rendah jika gambar gelap/blur)`;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25000);
+  const timeout = setTimeout(() => controller.abort(), 30000);
 
-  const resp = await fetch(DASHSCOPE_URL, {
+  const resp = await fetch(API_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -110,13 +116,13 @@ Balas HANYA JSON valid: {"riskLevel":"safe|caution|danger","summary":"...Bahasa 
     },
     body: JSON.stringify({
       model: MODEL,
-      max_tokens: 800,
+      max_tokens: 1024,
       temperature: 0.3,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: [
           { type: 'image_url', image_url: { url: imageDataUrl } },
-          { type: 'text', text: `Analisis lingkungan ini untuk bencana ${disasterType}. Berikan rekomendasi spesifik berdasarkan apa yang terlihat di gambar.${context ? ' Konteks: ' + context : ''}` }
+          { type: 'text', text: `Analisis lingkungan ini untuk persiapan menghadapi bencana ${disasterType}. Apa yang terlihat di gambar? Berikan rekomendasi berlindung yang spesifik berdasarkan objek yang kamu lihat.${context ? '\nKonteks lokasi: ' + context : ''}` }
         ]}
       ]
     }),
@@ -127,13 +133,13 @@ Balas HANYA JSON valid: {"riskLevel":"safe|caution|danger","summary":"...Bahasa 
 
   if (!resp.ok) {
     const errText = await resp.text().catch(() => '');
-    throw new Error(`API ${resp.status}: ${errText.substring(0, 100)}`);
+    throw new Error(`Groq API ${resp.status}: ${errText.substring(0, 150)}`);
   }
 
   const data = await resp.json();
   const text = data.choices?.[0]?.message?.content || '';
   const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error('Invalid AI response');
+  if (!jsonMatch) throw new Error('No JSON in AI response: ' + text.substring(0, 100));
   return JSON.parse(jsonMatch[0]);
 }
 
@@ -156,27 +162,24 @@ export default async function handler(req, res) {
   let result;
   let usedAI = false;
 
-  // Try AI first if we have a valid-looking key (sk-... for DashScope)
-  const hasValidKey = API_KEY.startsWith('sk-');
-
-  if (image && hasValidKey) {
+  // Try AI if we have a key and an image
+  if (image && API_KEY) {
     try {
       let imageDataUrl = image.startsWith('data:') ? image : `data:image/jpeg;base64,${image}`;
-      console.log('[API] Trying AI analysis with DashScope...');
+      console.log('[API] Sending to Groq Vision...');
       result = await aiAnalysis(imageDataUrl, disasterType, context);
       usedAI = true;
-      console.log('[API] AI analysis successful');
+      console.log('[API] AI success:', result.riskLevel);
     } catch (err) {
-      console.warn('[API] AI failed, falling back to rules:', err.message);
+      console.warn('[API] AI failed, using fallback:', err.message);
     }
   }
 
-  // Fallback: rule-based (always works)
+  // Fallback: rule-based
   if (!result) {
     result = ruleBasedAnalysis(disasterType);
-    if (!usedAI) {
-      result.summary = '[Mode Offline] ' + result.summary;
-      result.confidence = Math.min(result.confidence, 0.6);
+    if (!usedAI && !image) {
+      result.summary = '[Tanpa kamera] ' + result.summary;
     }
   }
 
@@ -185,10 +188,10 @@ export default async function handler(req, res) {
   if (!Array.isArray(result.recommendations)) result.recommendations = [];
   if (!Array.isArray(result.dangerZones)) result.dangerZones = [];
   if (result.confidence == null) result.confidence = 0.5;
-  result.source = usedAI ? 'ai' : 'rule-based';
+  result.source = usedAI ? 'ai-groq' : 'rule-based';
 
   res.setHeader('Content-Type', 'application/json');
   res.status(200).json(result);
 }
 
-export const config = { maxDuration: 30 };
+export const config = { maxDuration: 35 };
