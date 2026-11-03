@@ -214,11 +214,12 @@
 
     <!-- Capture button -->
     <div class="scanner-controls">
-      <p class="scanner-hint" id="scanner-hint">Arahkan kamera ke sekitar Anda, lalu tekan tombol untuk capture</p>
+      <p class="scanner-hint" id="scanner-hint">Tekan & tahan untuk rekam 3 detik, atau tap untuk foto sekali</p>
       <button id="btn-capture" class="capture-btn">
-        <span class="capture-ring"></span>
-        <span class="capture-inner">📸</span>
+        <span class="capture-ring" id="capture-ring"></span>
+        <span class="capture-inner" id="capture-icon">🎬</span>
       </button>
+      <p class="scanner-timer hidden" id="scanner-timer">⏺ Merekam… <span id="timer-count">3</span></p>
     </div>
 
     <!-- Loading state -->

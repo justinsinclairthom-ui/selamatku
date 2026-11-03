@@ -561,12 +561,19 @@ function captureFrame() {
   return dataUrl;
 }
 
-async function analyzeScene(imageData) {
+/** Sleep helper */
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+/** Analyze scene — accepts single frame string or array of frames (video) */
+async function analyzeScene(frames) {
+  // Normalize to array
+  if (typeof frames === 'string') frames = [frames];
+
   const loadingEl = document.getElementById('scanner-loading');
   const resultsEl = document.getElementById('scanner-results');
   const hintEl = document.getElementById('scanner-hint');
 
-  // Visual flash effect on capture
+  // Visual flash
   const video = document.getElementById('scanner-video');
   if (video) {
     video.style.filter = 'brightness(2)';
@@ -575,52 +582,50 @@ async function analyzeScene(imageData) {
 
   loadingEl.classList.remove('hidden');
   resultsEl.classList.add('hidden');
-  if (hintEl) hintEl.textContent = '📤 Mengirim ke AI…';
+  const isVideo = frames.length > 1;
+  if (hintEl) hintEl.textContent = isVideo ? `📤 Menganalisis ${frames.length} frame…` : '📤 Menganalisis…';
 
   try {
-    console.log('[Scanner] Sending image, size:', imageData.length, 'bytes');
+    // Send only first and last frame for video (saves bandwidth)
+    // Or all frames if ≤ 3
+    const framesToSend = frames.length <= 3 ? frames : [frames[0], frames[Math.floor(frames.length/2)], frames[frames.length-1]];
+
+    console.log(`[Scanner] Sending ${framesToSend.length} frame(s), total size:`,
+      Math.round(framesToSend.reduce((s, f) => s + f.length, 0) / 1024) + 'KB');
 
     const resp = await fetch('/api/analyze-safety', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        image: imageData,
+        images: framesToSend, // array of base64 data URLs
         disasterType: selectedDisasterType,
+        isVideo: isVideo,
         context: state.userPos ? `Lokasi: ${state.userPos.lat.toFixed(4)}, ${state.userPos.lng.toFixed(4)}` : ''
       })
     });
 
-    console.log('[Scanner] Response status:', resp.status);
+    console.log('[Scanner] Response:', resp.status);
 
     if (!resp.ok) {
       let errMsg = `Server error (${resp.status})`;
-      try {
-        const errBody = await resp.json();
-        errMsg = errBody.error || errMsg;
-      } catch(e) {}
+      try { const e = await resp.json(); errMsg = e.error || errMsg; } catch(ex) {}
       throw new Error(errMsg);
     }
 
     const result = await resp.json();
-    console.log('[Scanner] Analysis result:', result);
+    console.log('[Scanner] Result:', JSON.stringify(result).substring(0, 200));
     renderSafetyResult(result);
 
   } catch (err) {
     console.error('[Scanner] Error:', err);
     loadingEl.classList.add('hidden');
-    if (hintEl) hintEl.textContent = 'Arahkan kamera ke sekitar Anda, lalu tekan tombol untuk capture';
+    if (hintEl) hintEl.textContent = 'Tekan & tahan untuk rekam, atau tap untuk foto';
 
-    // Specific error messages
     let userMsg = err.message;
-    if (err.message.includes('fetch') || err.message.includes('network')) {
-      userMsg = 'Koneksi terputus. Periksa internet Anda.';
-    } else if (err.message.includes('429')) {
-      userMsg = 'Terlalu banyak scan. Tunggu 1 menit lalu coba lagi.';
-    } else if (err.message.includes('ANTHROPIC_API_KEY') || err.message.includes('not configured')) {
-      userMsg = 'Server belum dikonfigurasi. Hubungi developer.';
-    }
+    if (err.name === 'TypeError' || err.message.includes('fetch')) userMsg = 'Koneksi terputus. Periksa internet.';
+    else if (err.message.includes('429')) userMsg = 'Terlalu banyak scan. Tunggu 1 menit.';
 
-    showInAppAlert('❌ Gagal Analisis', userMsg + '\n\nTips:\n• Pastikan koneksi internet aktif\n• Gambar tidak terlalu gelap\n• Coba lagi dalam beberapa detik');
+    showInAppAlert('❌ Gagal Analisis', userMsg + '\n\nCoba perbaiki pencahayaan dan retry.');
   }
 }
 
@@ -1650,27 +1655,84 @@ function initEvents() {
   const btnCloseScanner = document.getElementById('btn-close-scanner');
   if (btnCloseScanner) btnCloseScanner.addEventListener('click', closeSafetyScanner);
 
+  // Capture: tap = single photo, hold 1s+ = record 3s video (3 frames)
   const btnCapture = document.getElementById('btn-capture');
-  if (btnCapture) btnCapture.addEventListener('click', async () => {
+  let pressTimer = null;
+  let isRecording = false;
+
+  if (btnCapture) {
+    btnCapture.addEventListener('touchstart', onCaptureStart);
+    btnCapture.addEventListener('touchend', onCaptureEnd);
+    btnCapture.addEventListener('mousedown', onCaptureStart);
+    btnCapture.addEventListener('mouseup', onCaptureEnd);
+  }
+
+  function onCaptureStart() {
     hapticTap();
     const video = document.getElementById('scanner-video');
-
-    // Check if video is actually playing
     if (!video || video.readyState < 2) {
-      showInAppAlert('⚠️ Kamera belum siap', 'Tunggu sampai pratinjau kamera muncul, lalu coba lagi.');
+      showInAppAlert('⚠️ Kamera belum siap', 'Tunggu sampai pratinjau kamera muncul.');
       return;
     }
+    // Start timer for hold detection
+    pressTimer = setTimeout(() => {
+      startVideoRecording();
+    }, 600); // hold for 600ms to trigger video mode
+  }
 
+  function onCaptureEnd() {
+    if (isRecording) return; // already in video mode
+    clearTimeout(pressTimer);
+    // Short press = single frame capture
     const frame = captureFrame();
     if (!frame) {
-      showInAppAlert('⚠️ Gagal capture', 'Kamera tidak menghasilkan gambar. Coba tutup dan buka lagi scanner.');
+      showInAppAlert('⚠️ Gagal capture', 'Kamera tidak menghasilkan gambar. Coba lagi.');
+      return;
+    }
+    analyzeScene([frame]);
+  }
+
+  async function startVideoRecording() {
+    if (isRecording) return;
+    isRecording = true;
+    btnCapture.disabled = true;
+
+    const timerEl = document.getElementById('scanner-timer');
+    const countEl = document.getElementById('timer-count');
+    const ring = document.getElementById('capture-ring');
+    const icon = document.getElementById('capture-icon');
+    if (ring) ring.style.borderColor = '#ef4444';
+    if (icon) icon.textContent = '⏺';
+    if (timerEl) timerEl.classList.remove('hidden');
+
+    const frames = [];
+    const duration = 3000; // 3 seconds
+    const interval = 1000; // capture every 1 second
+    let elapsed = 0;
+
+    while (elapsed < duration) {
+      if (countEl) countEl.textContent = Math.ceil((duration - elapsed) / 1000);
+      await sleep(interval);
+      elapsed += interval;
+      const f = captureFrame();
+      if (f) frames.push(f);
+    }
+
+    // Stop recording UI
+    if (ring) ring.style.borderColor = '';
+    if (icon) icon.textContent = '🎬';
+    if (timerEl) timerEl.classList.add('hidden');
+    isRecording = false;
+    btnCapture.disabled = false;
+
+    if (frames.length === 0) {
+      showInAppAlert('⚠️ Gagal merekam', 'Tidak ada frame yang terekam. Coba lagi.');
       return;
     }
 
-    console.log('[Scanner] Frame captured:', frame.substring(0, 50), '... total', frame.length);
-    btnCapture.disabled = true;
-    analyzeScene(frame).finally(() => { btnCapture.disabled = false; });
-  });
+    console.log(`[Scanner] Recorded ${frames.length} frames`);
+    analyzeScene(frames);
+  }
 
   const btnRescanAI = document.getElementById('btn-rescan-ai');
   if (btnRescanAI) btnRescanAI.addEventListener('click', () => {

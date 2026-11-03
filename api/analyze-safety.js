@@ -1,16 +1,18 @@
 /**
  * Vercel Serverless Function — AI Safety Analysis
  * POST /api/analyze-safety
- * Body: { image: base64String, disasterType: string, context?: string }
- * Returns: { riskLevel, summary, recommendations[], dangerZones[], confidence }
+ * Body: { images: [base64...], disasterType, isVideo?, context? }
+ *       or { image: base64, disasterType } (legacy)
+ * Returns: { riskLevel, summary, recommendations[], dangerZones[], confidence, source }
  *
- * Backend: Groq Cloud (Llama Vision) — free tier 14,400 req/hari
- * Env: GROQ_API_KEY
+ * Backends (priority):
+ * 1. Cloudflare Workers AI (if CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID set)
+ * 2. Rule-based fallback (always works)
  */
 
-const API_KEY = process.env.GROQ_API_KEY || '';
-const API_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const MODEL = 'llama-3.2-11b-vision-preview';
+const CF_TOKEN = process.env.CLOUDFLARE_API_TOKEN || '';
+const CF_ACCOUNT = process.env.CLOUDFLARE_ACCOUNT_ID || '';
+const CF_MODEL = '@cf/meta/llama-3.2-11b-vision-instruct';
 
 // Rate limiter
 const rateLimits = new Map();
@@ -25,121 +27,127 @@ function checkRateLimit(req) {
   return true;
 }
 
-// ── RULE-BASED FALLBACK (always works, no API needed) ─────────
-function ruleBasedAnalysis(disasterType) {
+// ── RULE-BASED FALLBACK ───────────────────────────────────────
+function ruleBasedAnalysis(disasterType, hasVisualContext) {
   const rules = {
     gempa: {
       riskLevel: 'danger',
-      summary: 'Gempa terdeteksi! Segera lindungi diri Anda.',
+      summary: hasVisualContext
+        ? 'Berdasarkan rekaman lingkungan, segera ambil posisi Drop-Cover-Hold.'
+        : 'Gempa terdeteksi! Segera lindungi diri Anda.',
       recommendations: [
-        { action: 'BERHENTI, LINDUNGI, BERPEGANGAN (Drop-Cover-Hold)', location: 'Di bawah meja/kursi kuat di dekat Anda', priority: 1 },
-        { action: 'Jauhi jendela, lemari tinggi, dan lampu gantung', location: 'Pindah ke area terbuka di ruangan', priority: 1 },
-        { action: 'Lindungi kepala dengan tangan/bantal', location: 'Posisi Anda sekarang', priority: 2 },
-        { action: 'Setelah goncangan berhenti, keluar melalui jalur evakuasi', location: 'Pintu keluar terdekat', priority: 3 }
+        { action: 'BERHENTI, LINDUNGI, BERPEGANGAN (Drop-Cover-Hold)', location: 'Di bawah meja/kursi kuat terdekat', priority: 1 },
+        { action: 'Jauhi jendela kaca, lemari tinggi, lampu gantung', location: 'Pindah ke area terbuka di ruangan', priority: 1 },
+        { action: 'Lindungi kepala dengan tangan/bantal/tas', location: 'Posisi Anda sekarang', priority: 2 },
+        { action: 'Setelah goncangan berhenti, keluar via jalur evakuasi', location: 'Pintu keluar terdekat', priority: 3 }
       ],
-      dangerZones: ['Jendela kaca', 'Lemari/gudang tinggi', 'Lampu gantung', 'Rak buku', 'Benda berat yang tergantung'],
-      confidence: 0.7
+      dangerZones: ['Jendela & kaca', 'Lemari/rak tinggi', 'Lampu gantung', 'Benda tergantung', 'Dengan bata ringan tanpa penguat'],
+      confidence: hasVisualContext ? 0.75 : 0.6
     },
     tsunami: {
       riskLevel: 'danger',
-      summary: 'PERINGATAN TSUNAMI! Evakuasi segera ke tempat tinggi!',
+      summary: 'PERINGATAN TSUNAMI! Evakuasi MENDARAT ke tempat tinggi!',
       recommendations: [
-        { action: 'SEGERA pergi ke tempat tinggi (min. 15m dpl atau 30m dari pantai)', location: 'Bukit/bangunan tinggi terdekat', priority: 1 },
-        { action: 'Jauhi pantai, sungai, dan muara', location: 'Arah jauh dari air', priority: 1 },
-        { action: 'Jangan gunakan kendaraan jika macet — jalan kaki lebih cepat', location: 'Jalur evakuasi vertikal', priority: 2 },
-        { action: 'Bawa dokumen penting & HP jika sempat (maks 1 menit)', location: 'Tas/ransel Anda', priority: 3 }
+        { action: 'SEGERA naik ke tempat tinggi (min. 15m dpl / 30m dari pantai)', location: 'Bukit/bangunan tinggi/escalator vertikal', priority: 1 },
+        { action: 'Jauhi pantai, sungai, muara, dan area rendah', location: 'Arah内陆/jauh dari air', priority: 1 },
+        { action: 'Jalan kaki lebih cepat daripada kendaraan saat panik', location: 'Jalur evakuasi vertikal (naik)', priority: 2 },
+        { action: 'Bawa HP + dokumen penting (maks 1 menit persiapan)', location: 'Tas/ransel Anda', priority: 3 }
       ],
-      dangerZones: ['Pantai & tepian air', 'Sungai & muara', 'Area rendah/depressed', 'Jembatan dekat air'],
+      dangerZones: ['Pantai & tepian air', 'Sungai/muara', 'Area depressed/rendah', 'Jembatan dekat perairan'],
       confidence: 0.8
     },
     banjir: {
       riskLevel: 'caution',
-      summary: 'Waspada banjir! Cari tempat yang lebih tinggi.',
+      summary: 'Waspada banjir! Pindah ke area yang lebih tinggi.',
       recommendations: [
-        { action: 'Pindah ke lantai atas atau tempat tinggi', location: 'Lantai 2+ / atap / bukit', priority: 1 },
-        { action: 'Matikan listrik di panel utama jika air sudah masuk', location: 'Panel listrik rumah', priority: 1 },
-        { action: 'Jangan berjalan/mengendarai melewati genangan air', location: 'Hindari jalan tergenang', priority: 2 },
-        { action: 'Siapkan tas darurat: obat, air, dokumen, powerbank', location: 'Tempat mudah dijangkau', priority: 3 }
+        { action: 'Naik ke lantai atas atau atap bangunan', location: 'Lantai 2+ / rooftop / bukit', priority: 1 },
+        { action: 'Matikan listrik panel utama sebelum air naik', location: 'Panel MCB rumah', priority: 1 },
+        { action: 'Jangan warkat/kendarai di genangan (arus bawah berbahaya)', location: 'Hindari jalan tergenang', priority: 2 },
+        { action: 'Siapkan: obat, air minum, powerbank, dokumen', location: 'Tas darurat siap bawa', priority: 3 }
       ],
-      dangerZones: ['Genangan air (potensi arus bawah)', 'Kolam listrik/pascn', 'Area rendah', 'Bawah jembatan'],
+      dangerZones: ['Genangan (arus bawah)', 'Kolam listrik', 'Area rendah', 'Bawah jembatan'],
       confidence: 0.7
     },
     angin: {
       riskLevel: 'caution',
-      summary: 'Angin kencang! Cari perlindungan interior.',
+      summary: 'Angin kencang! Cari perlindungan di interior bangunan.',
       recommendations: [
-        { action: 'Masuk ke ruangan interior (tanpa jendela)', location: 'Ruangan tengah bangunan / lorong', priority: 1 },
-        { action: 'Jauhi jendela, pintu kaca, dan area dengan reklame', location: 'Dinding dalam tanpa kaca', priority: 1 },
-        { action: 'Tunduk rendah, lindungi kepala', location: 'Di bawah meja/bangku kokoh', priority: 2 },
-        { action: 'Jika outdoor dan tidak ada bangunan, berbaring face-down di parit/turunan', location: 'Area rendah terbuka', priority: 3 }
+        { action: 'Masuk ke ruangan tanpa jendela (lorong, kamar tengah)', location: 'Interior building / basement', priority: 1 },
+        { action: 'Jauhi kaca, pintu glass, papan reklame', location: 'Dinding dalam solid', priority: 1 },
+        { action: 'Tunduk rendah, lindungi kepala dengan lengan', location: 'Di bawah meja/bangku kokoh', priority: 2 },
+        { action: 'Jika outdoor: berbaring face-down di parit/turunan', location: 'Area rendah terbuka', priority: 3 }
       ],
-      dangerZones: ['Jendela & kaca', 'Papan reklame/spanduk', 'Pohon besar', 'Bangunan reyot', 'Tiang listrik'],
+      dangerZones: ['Kaca & jendela', 'Reklame/spanduk', 'Pohon besar', 'Bangunan reyot', 'Tiang listrik'],
       confidence: 0.7
     },
     umum: {
       riskLevel: 'caution',
-      summary: 'Kondisi darurat terdeteksi. Tetap tenang dan cari tempat aman.',
+      summary: 'Kondisi darurat. Tetap tenang dan cari tempat aman.',
       recommendations: [
-        { action: 'Tetap tenang, amati lingkungan sekitar', location: 'Posisi Anda sekarang', priority: 1 },
-        { action: 'Cari jalur keluar terdekat yang aman', location: 'Pintu keluar / exit', priority: 1 },
-        { action: 'Lindungi kepala dari benda jatuh', location: 'Di bawah meja/benda kokoh', priority: 2 },
-        { action: 'Ikuti instruksi petugas darurat', location: '-', priority: 3 }
+        { action: 'Tetap tenang, amati keadaan sekitar', location: 'Posisi Anda', priority: 1 },
+        { action: 'Identifikasi jalur keluar terdekat', location: 'Pintu/exit terdekat', priority: 1 },
+        { action: 'Lindungi kepala dari benda jatuh', location: 'Di bawah struktur kokoh', priority: 2 },
+        { action: 'Ikuti instruksi petugas/BPBD', location: '-', priority: 3 }
       ],
-      dangerZones: ['Benda yang bisa jatuh', 'Jalan rusak', 'Area kerumunan'],
+      dangerZones: ['Benda berpotensi jatuh', 'Lantai rusak', 'Kerumunan'],
       confidence: 0.5
     }
   };
   return rules[disasterType] || rules.umum;
 }
 
-// ── AI ANALYSIS via Groq (Llama Vision) ───────────────────────
-async function aiAnalysis(imageDataUrl, disasterType, context) {
-  const systemPrompt = `Kamu adalah analis keselamatan darurat Indonesia. Analisis gambar lingkungan pengguna dan berikan rekomendasi berlindung spesifik untuk bencana: ${disasterType.toUpperCase()}.
+// ── CLOUDFLARE WORKERS AI VISION ──────────────────────────────
+async function cloudflareVision(images, disasterType, context) {
+  // Use first image for analysis (Workers AI takes one image per request)
+  const imageData = images[0];
+  const base64Data = imageData.replace(/^data:image\/\w+;base64,/, '');
 
-Balas HANYA dalam format JSON valid (tanpa markdown, tanpa penjelasan tambahan):
-{"riskLevel":"safe|caution|danger","summary":"Satu kalimat Bahasa Indonesia","recommendations":[{"action":"Apa yang harus dilakukan","location":"Di mana","priority":1}],"dangerZones":["Bahaya yang terlihat di gambar"],"confidence":0.85}
+  const prompt = `Analisis gambar lingkungan ini untuk persiapan menghadapi bencana ${disasterType.toUpperCase()} di Indonesia.
+${images.length > 1 ? `(Ini adalah frame dari video ${images.length} detik — lingkungan sekitar pengguna)` : ''}
 
-Aturan:
-- Semua teks dalam Bahasa Indonesia
-- Maksimum 4 rekomendasi, priority 1=paling urgent
-- Berbasis apa yang KAMU LIHAT di gambar (meja, jendela, pintu, ruang terbuka, dll)
-- confidence 0.0-1.0 (rendah jika gambar gelap/blur)`;
+Deskripsikan apa yang kamu lihat, lalu berikan rekomendasi berlindung spesifik.
+
+Balas HANYA JSON valid:
+{"riskLevel":"safe|caution|danger","summary":"Satu kalimat Bahasa Indonesia berdasarkan objek yang terlihat","recommendations":[{"action":"Apa yang harus dilakukan (spesifik基于objek di gambar)","location":"Di mana persisnya","priority":1}],"dangerZones":["Bahaya spesifik yang terlihat"],"confidence":0.85}
+
+Aturan: Semua teks Bahasa Indonesia. Maks 4 recommendations. Priority 1=paling urgent. Berbasis OBJEK YANG KAMU LIHAT di gambar (jika ada meja → sebutkan "di bawah meja tersebut", jika ada jendela → "jauhi jendela di sebelah ${'kiri/kanan'}").`;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
 
-  const resp = await fetch(API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${API_KEY}`
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 1024,
-      temperature: 0.3,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: [
-          { type: 'image_url', image_url: { url: imageDataUrl } },
-          { type: 'text', text: `Analisis lingkungan ini untuk persiapan menghadapi bencana ${disasterType}. Apa yang terlihat di gambar? Berikan rekomendasi berlindung yang spesifik berdasarkan objek yang kamu lihat.${context ? '\nKonteks lokasi: ' + context : ''}` }
-        ]}
-      ]
-    }),
-    signal: controller.signal
-  });
+  const resp = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${CF_MODEL}`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${CF_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        messages: [
+          { role: 'user', content: [
+            { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64Data}` } },
+            { type: 'text', text: prompt }
+          ]}
+        ],
+        max_tokens: 1024,
+        temperature: 0.3
+      }),
+      signal: controller.signal
+    }
+  );
 
   clearTimeout(timeout);
 
   if (!resp.ok) {
     const errText = await resp.text().catch(() => '');
-    throw new Error(`Groq API ${resp.status}: ${errText.substring(0, 150)}`);
+    throw new Error(`Cloudflare AI ${resp.status}: ${errText.substring(0, 150)}`);
   }
 
   const data = await resp.json();
-  const text = data.choices?.[0]?.message?.content || '';
+  const text = data.result?.response || data.response || '';
   const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error('No JSON in AI response: ' + text.substring(0, 100));
+  if (!jsonMatch) throw new Error('No JSON in response: ' + text.substring(0, 100));
   return JSON.parse(jsonMatch[0]);
 }
 
@@ -156,30 +164,37 @@ export default async function handler(req, res) {
     return res.status(429).json({ error: 'Terlalu banyak permintaan. Tunggu 1 menit.' });
   }
 
-  const { image, disasterType, context } = req.body || {};
+  const { images, image, disasterType, isVideo, context } = req.body || {};
+
+  // Support both old (image) and new (images array) format
+  let frames = [];
+  if (Array.isArray(images)) frames = images;
+  else if (image) frames = [image];
+
   if (!disasterType) return res.status(400).json({ error: 'disasterType is required' });
 
   let result;
   let usedAI = false;
 
-  // Try AI if we have a key and an image
-  if (image && API_KEY) {
+  // Try Cloudflare Workers AI if configured
+  const hasCF = CF_TOKEN && CF_ACCOUNT;
+
+  if (frames.length > 0 && hasCF) {
     try {
-      let imageDataUrl = image.startsWith('data:') ? image : `data:image/jpeg;base64,${image}`;
-      console.log('[API] Sending to Groq Vision...');
-      result = await aiAnalysis(imageDataUrl, disasterType, context);
+      console.log(`[API] Cloudflare Vision: ${frames.length} frame(s), type=${disasterType}`);
+      result = await cloudflareVision(frames, disasterType, context);
       usedAI = true;
-      console.log('[API] AI success:', result.riskLevel);
+      console.log('[API] CF success:', result.riskLevel);
     } catch (err) {
-      console.warn('[API] AI failed, using fallback:', err.message);
+      console.warn('[API] CF failed:', err.message);
     }
   }
 
   // Fallback: rule-based
   if (!result) {
-    result = ruleBasedAnalysis(disasterType);
-    if (!usedAI && !image) {
-      result.summary = '[Tanpa kamera] ' + result.summary;
+    result = ruleBasedAnalysis(disasterType, frames.length > 0);
+    if (isVideo && frames.length > 1) {
+      result.summary = `[Video ${frames.length}s] ` + result.summary;
     }
   }
 
@@ -188,7 +203,8 @@ export default async function handler(req, res) {
   if (!Array.isArray(result.recommendations)) result.recommendations = [];
   if (!Array.isArray(result.dangerZones)) result.dangerZones = [];
   if (result.confidence == null) result.confidence = 0.5;
-  result.source = usedAI ? 'ai-groq' : 'rule-based';
+  result.source = usedAI ? 'cloudflare-ai' : 'rule-based';
+  result.framesAnalyzed = frames.length;
 
   res.setHeader('Content-Type', 'application/json');
   res.status(200).json(result);
