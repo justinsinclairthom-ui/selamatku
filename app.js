@@ -653,6 +653,28 @@ function renderSafetyResult(result) {
     </div>`;
   });
 
+  // Objects seen (from AI vision)
+  let objectsHtml = '';
+  if (result.objectsSeen && result.objectsSeen.length > 0) {
+    objectsHtml = `<div style="margin-bottom:12px;padding:10px;background:rgba(79,70,229,.06);border-radius:8px;border:1px solid rgba(79,70,229,.15)">
+      <strong style="font-size:.78rem;color:var(--clr-primary)">👁️ Objek terdeteksi:</strong>
+      <p style="font-size:.78rem;color:var(--clr-text-2);margin-top:4px">${result.objectsSeen.map(o => esc(o)).join(' · ')}</p>
+    </div>`;
+  }
+
+  // Nearest safety (radius 50km context)
+  let safetyHtml = '';
+  if (result.nearestSafety) {
+    safetyHtml = `<div style="margin-bottom:12px;padding:10px;background:rgba(34,197,94,.06);border-radius:8px;border:1px solid rgba(34,197,94,.15)">
+      <strong style="font-size:.78rem;color:#16a34a">🛡️ Tempat aman terdekat (radius 50km):</strong>
+      <p style="font-size:.78rem;color:var(--clr-text-2);margin-top:4px">${esc(result.nearestSafety)}</p>
+    </div>`;
+  }
+
+  // Inject before recs
+  const recsContainer = document.getElementById('result-recs');
+  recsContainer.insertAdjacentHTML('beforebegin', objectsHtml + safetyHtml);
+
   // Danger zones
   const dangersEl = document.getElementById('result-dangers');
   const dangerList = document.getElementById('result-danger-list');
@@ -663,10 +685,11 @@ function renderSafetyResult(result) {
     dangersEl.classList.add('hidden');
   }
 
-  // Confidence
+  // Confidence + source
   const conf = result.confidence != null ? Math.round(result.confidence * 100) : null;
+  const srcLabel = result.source === 'cloudflare-ai' ? 'AI Vision' : 'Rule Engine';
   document.getElementById('result-confidence').textContent =
-    conf ? `Confidence analisis: ${conf}%` : '';
+    `${srcLabel} · Confidence: ${conf || '?'}%${result.framesAnalyzed > 1 ? ` · ${result.framesAnalyzed} frame dianalisis` : ''}`;
 
   // Haptic feedback based on risk
   if (result.riskLevel === 'danger') hapticDanger();
@@ -1868,7 +1891,7 @@ async function clearOldCaches() {
   } catch(e) {}
 }
 
-// ── BOOT ─────────────────────────────────────────────────────
+// ── BOOT ────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   await clearOldCaches();
   registerServiceWorker();
@@ -1882,4 +1905,371 @@ document.addEventListener('DOMContentLoaded', async () => {
   renderFavorites();
   renderHistory();
   renderFamily();
+  // New features
+  initSettings();
+  initHazardChips();
+  initChatPanel();
+  setTimeout(loadWeather, 3000);
+  setInterval(() => { if (state.userPos) loadWeather(); }, 120000);
 });
+
+// ════════════════════════════════════════════════════════
+// SETTINGS: Dark Mode, Font Size, Toggles
+// ════════════════════════════════════════════════════════
+function initSettings() {
+  const html = document.documentElement;
+  const settingsBtn   = document.getElementById('settingsBtn');
+  const overlay       = document.getElementById('settings-overlay');
+  const closeSettings = document.getElementById('btn-close-settings');
+  const toggleDark    = document.getElementById('toggle-dark');
+  const togglePush    = document.getElementById('toggle-push');
+  const toggleAlarm   = document.getElementById('toggle-alarm');
+  const fontOpts      = document.querySelectorAll('.font-opt');
+  const btnChangePos  = document.getElementById('btn-settings-change-pos');
+
+  // Restore saved prefs
+  const savedTheme = localStorage.getItem('sk_theme') || 'light';
+  const savedFont  = localStorage.getItem('sk_font')  || 'normal';
+  html.dataset.theme = savedTheme;
+  html.dataset.font  = savedFont;
+  if (toggleDark) {
+    toggleDark.classList.toggle('on', savedTheme === 'dark');
+    toggleDark.setAttribute('aria-checked', String(savedTheme === 'dark'));
+  }
+  fontOpts.forEach(b => b.classList.toggle('active', b.dataset.size === savedFont));
+
+  function openSettings() {
+    overlay && overlay.classList.remove('hidden');
+    hapticTap();
+  }
+  function closeSettingsFn() {
+    overlay && overlay.classList.add('hidden');
+    hapticTap();
+  }
+
+  if (settingsBtn) settingsBtn.addEventListener('click', openSettings);
+  if (closeSettings) closeSettings.addEventListener('click', closeSettingsFn);
+  if (overlay) overlay.addEventListener('click', e => { if (e.target === overlay) closeSettingsFn(); });
+
+  if (toggleDark) toggleDark.addEventListener('click', () => {
+    const isDark = toggleDark.classList.toggle('on');
+    toggleDark.setAttribute('aria-checked', String(isDark));
+    html.dataset.theme = isDark ? 'dark' : 'light';
+    localStorage.setItem('sk_theme', isDark ? 'dark' : 'light');
+    hapticTap();
+  });
+
+  if (togglePush) togglePush.addEventListener('click', () => {
+    const on = togglePush.classList.toggle('on');
+    togglePush.setAttribute('aria-checked', String(on));
+    hapticTap();
+  });
+
+  if (toggleAlarm) toggleAlarm.addEventListener('click', () => {
+    const on = toggleAlarm.classList.toggle('on');
+    toggleAlarm.setAttribute('aria-checked', String(on));
+    state.soundOn = on;
+    const sndBtn = document.getElementById('btn-sound');
+    if (sndBtn) sndBtn.textContent = on ? '🔊' : '🔇';
+    hapticTap();
+  });
+
+  fontOpts.forEach(btn => btn.addEventListener('click', () => {
+    fontOpts.forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    html.dataset.font = btn.dataset.size;
+    localStorage.setItem('sk_font', btn.dataset.size);
+    hapticTap();
+  }));
+
+  if (btnChangePos) btnChangePos.addEventListener('click', () => {
+    closeSettingsFn();
+    showManualPosModal('Ubah koordinat posisi Anda:');
+  });
+}
+
+// ════════════════════════════════════════════════════════
+// WEATHER CARD (Open-Meteo — no API key needed)
+// ════════════════════════════════════════════════════════
+async function loadWeather() {
+  const iconEl = document.getElementById('weather-icon');
+  const tempEl = document.getElementById('weather-temp');
+  const descEl = document.getElementById('weather-desc');
+  const locEl  = document.getElementById('weather-loc');
+  const windEl = document.getElementById('weather-wind-val');
+  if (!iconEl || !tempEl) return;
+
+  const pos = state.userPos;
+  if (!pos) {
+    descEl.textContent = 'Izinkan lokasi untuk lihat cuaca';
+    return;
+  }
+
+  try {
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${pos.lat}&longitude=${pos.lng}` +
+      `&current_weather=true&timezone=auto`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const cw = data.current_weather;
+    if (!cw) return;
+
+    const WMO = {
+      0:['☀️','Cerah'],1:['🌤️','Kebanaran'],2:['⛅','Berawan'],3:['☁️','Mendung'],
+      45:['🌫️','Kabut'],48:['🌫️','Kabut Es'],51:['🌦️','Gerimis'],53:['🌦️','Gerimis'],
+      55:['🌧️','Hujan Gerimis'],61:['🌧️','Hujan Ringan'],63:['🌧️','Hujan'],
+      65:['🌧️','Hujan Lebat'],71:['🌨️','Salju Ringan'],73:['🌨️','Salju'],
+      75:['❄️','Salju Lebat'],80:['🌦️','Hujan Ringan'],81:['🌧️','Hujan'],
+      82:['⛈️','Hujan Badai'],95:['⛈️','Badai Petir'],96:['⛈️','Badai+Es'],99:['⛈️','Badai+Es']
+    };
+    const [emoji, label] = WMO[cw.weathercode] || ['🌡️','Cuaca'];
+    iconEl.textContent = emoji;
+    tempEl.textContent = `${Math.round(cw.temperature)}°C`;
+    descEl.textContent = label;
+    windEl.textContent = `${Math.round(cw.windspeed)} km/j`;
+
+    // Reverse geocode for location name
+    if (locEl) {
+      try {
+        const geoRes = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${pos.lat}&longitude=${pos.lng}&localityLanguage=id`);
+        const geo = await geoRes.json();
+        locEl.textContent = geo.city || geo.locality || geo.principalSubdivision || '';
+      } catch {}
+    }
+  } catch(e) {
+    descEl.textContent = 'Gagal memuat cuaca';
+  }
+}
+
+// Call loadWeather after position is acquired
+const _origSetUserPos = window._setUserPos;
+function patchLoadWeather() {
+  const origFetch = window.fetch;
+  // Simple approach: call loadWeather when userPos is set
+  const observer = new MutationObserver(() => {
+    if (state.userPos) loadWeather();
+  });
+  // Just call it periodically and on tab switch
+  setInterval(() => { if (state.userPos) loadWeather(); }, 60000);
+}
+
+// ════════════════════════════════════════════════════════
+// HAZARD FILTER CHIPS
+// ════════════════════════════════════════════════════════
+function initHazardChips() {
+  const chips = document.querySelectorAll('#hazard-chips .chip');
+  let activeFilter = 'all';
+
+  chips.forEach(chip => chip.addEventListener('click', () => {
+    hapticTap();
+    chips.forEach(c => c.classList.remove('chip-active'));
+    chip.classList.add('chip-active');
+    activeFilter = chip.dataset.hazard;
+    filterDisasters(activeFilter);
+  }));
+}
+
+function filterDisasters(hazard) {
+  const list = document.getElementById('disaster-list');
+  if (!list) return;
+  const cards = list.querySelectorAll('.card');
+  cards.forEach(card => {
+    if (hazard === 'all') { card.style.display = ''; return; }
+    const text = (card.textContent || '').toLowerCase();
+    const match = text.includes(hazard);
+    card.style.display = match ? '' : 'none';
+  });
+}
+
+// ════════════════════════════════════════════════════════
+// AI CHAT PANEL
+// ════════════════════════════════════════════════════════
+const CHAT_RESPONSES = [
+  { keywords: ['gempa', 'getar', 'quake'], reply:
+    '🌍 Saat gempa terjadi:\n\n1. **Tetap tenang** — jangan panik\n2. **Beri perlindungan di bawah meja** yang kokoh\n3. **Jauhi jendela** dan benda-benda tinggi\n4. Setelah berhenti, **periksa kerusakan** sekitar\n5. Jika di luar, **jauhi bangunan** dan tiang listrik\n\n💡 Tips: Simpan nomor darurat 112 di ponsel Anda.' },
+  { keywords: ['tsunami', 'gelombang', 'laut', 'pantai'], reply:
+    '🌊 Peringatan Tsunami:\n\n1. **Segera pergi ke tempat tinggi** (min. 30m dari permukaan laut)\n2. **Jangan menunggu** instruksi resmi jika merasakan gempa kuat >20 detik\n3. **Jangan kembali ke pantai** sampai dinyatakan aman\n4. Ikuti jalur evakuasi yang ditandai\n\n⚠️ Waktu tiba: 5–30 menit setelah gempa. Bergerak SEKARANG.' },
+  { keywords: ['banjir', 'air', 'flood', 'kebanjiran'], reply:
+    '💧 Saat Banjir:\n\n1. **Pergi ke lantai atas** atau atap jika air naik\n2. **Matikan listrik** di panel utama jika aman\n3. **Jangan berjalan** di air mengalir >30cm — bisa terseret\n4. **Siapkan dokumen penting** dalam plastik kedap air\n5. Hubungi 112 jika terjebak\n\n💡 Cek tingkat air melalui aplikasi ini secara berkala.' },
+  { keywords: ['tempat aman', 'shelter', 'berlindung', 'aman', 'hospital', 'rs', 'rumah sakit'], reply:
+    '🏥 Cara menemukan tempat aman terdekat:\n\n1. Buka tab **"Aman"** di aplikasi ini\n2. Pilih jenis tempat yang Anda butuhkan\n3. Aplikasi akan menampilkan jarak & arah\n4. Tekan **⭐** untuk menyimpan sebagai favorit\n\n💡 Saran: Simpan minimal 2 tempat aman sebagai favorit sebelum bencana terjadi.' },
+  { keywords: ['keluarga', 'sharing', 'sms', 'whatsapp', 'hubungi'], reply:
+    '👥 Berbagi Posisi dengan Keluarga:\n\n1. Buka tab **"Keluarga"**\n2. Tambahkan anggota beserta nomor HP mereka\n3. Saat darurat, tekan tombol **SMS/WA** pada kartu mereka\n4. Posisi Anda otomatis terlampir\n\n💡 Tips: Lakukan "check-in" keluarga setiap hari saat keadaan normal.' },
+  { keywords: ['evakuasi', 'rute', 'jalur', 'route', 'nav'], reply:
+    '🚨 Jalur Evakuasi:\n\n1. Ketahui **minimal 2 jalur evakuasi** dari rumah Anda\n2. Ikuti tanda panah hijau di jalan\n3. **Jangan menggunakan lift** saat gempa\n4. Bawa tas siaga: air, obat, dokumen, senter\n5. Titik kumpul keluarga harus ditentukan sebelumnya\n\n💡 Gunakan tab "Peta" → "Mulai Evakuasi" untuk rute optimal via OSRM.' },
+  { keywords: ['tas siaga', 'emergency kit', 'persiapan', 'siaga'], reply:
+    '🎒 Isi Tas Siaga Darurat:\n\n• Air minum (min. 2L/orang/hari × 3 hari)\n• Makanan kaleng / biskuit\n• Obat-obatan pribadi\n• Senter + baterai cadangan\n• Radio portabel\n• Salinan dokumen (KTP, KK, asuransi)\n• Uang tunai kecil\n• P3K dasar\n• Power bank\n• Peluit (untuk sinyal)' },
+  { keywords: ['nomor', 'darurat', '112', 'bpbd', 'telepon', 'call'], reply:
+    '📞 Nomor Darurat Indonesia:\n\n• **112** — Layanan Darurat Nasional\n• **110** — Polisi\n• **113** — Pemadam Kebakaran\n• **119** — Ambulans / Kesehatan\n• **BPBD Kota/Kab** — cek website lokal\n\n💡 Simpan semua nomor ini di kontak ponsel Anda sekarang.' },
+  { keywords: ['cuaca', 'weather', 'hujan', 'suhu', 'temperature'], reply:
+    '🌤️ Informasi Cuaca:\n\nBuka tab **"Bencana"** untuk melihat kartu cuaca real-time di lokasi Anda.\n\nData berasal dari Open-Meteo API — mencakup suhu, kondisi, dan kecepatan angin.\n\n⚠️ Waspadai hujan lebat berkepanjangan yang dapat memicu banjir atau longsor.' },
+];
+
+const DEFAULT_CHAT_REPLY =
+  'Saya asisten keselamatan SelamatKu. 🛡️\n\nSaya bisa membantu dengan:\n• 🌍 Tips keselamatan gempa\n• 🌊 Peringatan tsunami\n• 💧 Kesiapsiagaan banjir\n• 🏥 Menemukan tempat aman\n• 👥 Berbagi posisi keluarga\n• 🚨 Jalur evakuasi\n• 📞 Nomor darurat\n\nSilakan tanyakan apa saja!';
+
+function initChatPanel() {
+  const fab         = document.getElementById('btn-open-chat');
+  const panel       = document.getElementById('chat-panel');
+  const closeBtn    = document.getElementById('btn-close-chat');
+  const input       = document.getElementById('chat-input');
+  const sendBtn     = document.getElementById('btn-send-chat');
+  const messages    = document.getElementById('chat-messages');
+  const suggestions = document.getElementById('chat-suggestions');
+  const aiBadge     = document.getElementById('ai-badge');
+  const apiKeyRow   = document.getElementById('api-key-row');
+  const msKeyInput  = document.getElementById('ms-api-key-input');
+  const btnSaveKey  = document.getElementById('btn-save-ms-key');
+
+  if (!fab || !panel) return;
+
+  // Update badge based on API key presence
+  function updateAiBadge() {
+    const hasKey = !!localStorage.getItem('ms_api_key');
+    if (aiBadge) {
+      aiBadge.textContent = hasKey ? 'Qwen AI' : 'Offline';
+      aiBadge.classList.toggle('local', !hasKey);
+    }
+    if (apiKeyRow) apiKeyRow.classList.toggle('hidden', hasKey);
+  }
+  updateAiBadge();
+
+  // Save API key handler
+  if (btnSaveKey && msKeyInput) {
+    btnSaveKey.addEventListener('click', () => {
+      const val = msKeyInput.value.trim();
+      if (val) {
+        localStorage.setItem('ms_api_key', val);
+        msKeyInput.value = '';
+        updateAiBadge();
+        hapticTap();
+      }
+    });
+    msKeyInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') btnSaveKey.click();
+    });
+  }
+
+  function openChat() {
+    panel.classList.remove('hidden');
+    fab.classList.add('hidden');
+    updateAiBadge();
+    setTimeout(() => input && input.focus(), 300);
+    hapticTap();
+  }
+  function closeChat() {
+    panel.classList.add('hidden');
+    fab.classList.remove('hidden');
+    hapticTap();
+  }
+
+  fab.addEventListener('click', openChat);
+  if (closeBtn) closeBtn.addEventListener('click', closeChat);
+
+  function addMsg(text, cls) {
+    const div = document.createElement('div');
+    div.className = `chat-msg ${cls}`;
+    div.innerHTML = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
+    messages.appendChild(div);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  // ── ModelScope / DashScope Qwen integration ──────────────
+  const MODELSCOPE_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+  const MODELSCOPE_MODEL    = 'qwen-plus';
+
+  const SYSTEM_PROMPT =
+    'Kamu adalah SelamatKu Assistant — asisten keselamatan bencana berbahasa Indonesia yang ramah dan ringkas. ' +
+    'Jawab dalam Bahasa Indonesia. Fokus pada: tips keselamatan gempa/tsunami/banjir/longsor, jalur evakuasi, ' +
+    'nomor darurat Indonesia, persiapan tas siaga, dan penggunaan aplikasi SelamatKu. ' +
+    'Jawab maksimal 5-7 baris kecuali diminta lebih detail. Gunakan emoji secukupnya.';
+
+  let chatHistory = [];
+
+  async function fetchModelScope(query) {
+    const apiKey = localStorage.getItem('ms_api_key');
+    if (!apiKey) return null;
+    try {
+      chatHistory.push({ role: 'user', content: query });
+      // Keep last 10 messages to stay within token limit
+      const msgs = [
+        { role: 'system', content: SYSTEM_PROMPT },
+        ...chatHistory.slice(-10)
+      ];
+      const res = await fetch(`${MODELSCOPE_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model: MODELSCOPE_MODEL,
+          messages: msgs,
+          max_tokens: 300,
+          temperature: 0.7
+        })
+      });
+      if (!res.ok) {
+        console.warn('[ModelScope] API error:', res.status);
+        return null;
+      }
+      const data = await res.json();
+      const reply = data.choices?.[0]?.message?.content;
+      if (reply) {
+        chatHistory.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+      return null;
+    } catch(e) {
+      console.warn('[ModelScope] fetch failed:', e.message);
+      return null;
+    }
+  }
+
+  function localReply(q) {
+    const ql = q.toLowerCase();
+    for (const r of CHAT_RESPONSES) {
+      if (r.keywords.some(k => ql.includes(k))) return r.reply;
+    }
+    return DEFAULT_CHAT_REPLY;
+  }
+
+  async function handleSend() {
+    const val = (input.value || '').trim();
+    if (!val) return;
+    addMsg(val, 'user');
+    input.value = '';
+    sendBtn.disabled = true;
+    sendBtn.style.opacity = '0.5';
+
+    // Show typing indicator
+    const typingEl = document.createElement('div');
+    typingEl.className = 'chat-msg bot';
+    typingEl.id = 'typing-indicator';
+    typingEl.innerHTML = '<span class="typing-dots"><span></span><span></span><span></span></span>';
+    messages.appendChild(typingEl);
+    messages.scrollTop = messages.scrollHeight;
+
+    const aiReply = await fetchModelScope(val);
+    const finalReply = aiReply || localReply(val);
+
+    typingEl.remove();
+    addMsg(finalReply, 'bot');
+    sendBtn.disabled = false;
+    sendBtn.style.opacity = '1';
+  }
+
+  if (sendBtn) sendBtn.addEventListener('click', handleSend);
+  if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') handleSend(); });
+
+  if (suggestions) {
+    suggestions.querySelectorAll('.chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        input.value = chip.dataset.q;
+        handleSend();
+      });
+    });
+  }
+
+  // Show FAB after app loads
+  setTimeout(() => fab.classList.remove('hidden'), 1500);
+}

@@ -653,6 +653,28 @@ function renderSafetyResult(result) {
     </div>`;
   });
 
+  // Objects seen (from AI vision)
+  let objectsHtml = '';
+  if (result.objectsSeen && result.objectsSeen.length > 0) {
+    objectsHtml = `<div style="margin-bottom:12px;padding:10px;background:rgba(79,70,229,.06);border-radius:8px;border:1px solid rgba(79,70,229,.15)">
+      <strong style="font-size:.78rem;color:var(--clr-primary)">👁️ Objek terdeteksi:</strong>
+      <p style="font-size:.78rem;color:var(--clr-text-2);margin-top:4px">${result.objectsSeen.map(o => esc(o)).join(' · ')}</p>
+    </div>`;
+  }
+
+  // Nearest safety (radius 50km context)
+  let safetyHtml = '';
+  if (result.nearestSafety) {
+    safetyHtml = `<div style="margin-bottom:12px;padding:10px;background:rgba(34,197,94,.06);border-radius:8px;border:1px solid rgba(34,197,94,.15)">
+      <strong style="font-size:.78rem;color:#16a34a">🛡️ Tempat aman terdekat (radius 50km):</strong>
+      <p style="font-size:.78rem;color:var(--clr-text-2);margin-top:4px">${esc(result.nearestSafety)}</p>
+    </div>`;
+  }
+
+  // Inject before recs
+  const recsContainer = document.getElementById('result-recs');
+  recsContainer.insertAdjacentHTML('beforebegin', objectsHtml + safetyHtml);
+
   // Danger zones
   const dangersEl = document.getElementById('result-dangers');
   const dangerList = document.getElementById('result-danger-list');
@@ -663,10 +685,11 @@ function renderSafetyResult(result) {
     dangersEl.classList.add('hidden');
   }
 
-  // Confidence
+  // Confidence + source
   const conf = result.confidence != null ? Math.round(result.confidence * 100) : null;
+  const srcLabel = result.source === 'cloudflare-ai' ? 'AI Vision' : 'Rule Engine';
   document.getElementById('result-confidence').textContent =
-    conf ? `Confidence analisis: ${conf}%` : '';
+    `${srcLabel} · Confidence: ${conf || '?'}%${result.framesAnalyzed > 1 ? ` · ${result.framesAnalyzed} frame dianalisis` : ''}`;
 
   // Haptic feedback based on risk
   if (result.riskLevel === 'danger') hapticDanger();

@@ -1,20 +1,21 @@
 <!DOCTYPE html>
-<html lang="id">
+<html lang="id" data-theme="light" data-font="normal">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <meta name="theme-color" content="#1a73e8" />
+  <meta name="theme-color" content="#4f46e5" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#0b1120" media="(prefers-color-scheme: dark)" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="SelamatKu" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>SelamatKu — Deteksi & Evakuasi Bencana</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=5" />
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" href="icons/icon-192.png" type="image/png" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
-  <link rel="mask-icon" href="icons/maskable-192.png" color="#1a73e8" />
+  <link rel="mask-icon" href="icons/maskable-192.png" color="#4f46e5" />
 </head>
 <body>
   <!-- ── HEADER ─────────────────────────────────────────── -->
@@ -25,6 +26,7 @@
       <div class="header-actions">
         <button id="btn-notification" class="icon-btn" title="Notifikasi aktif/nonaktif">🔕</button>
         <button id="btn-sound" class="icon-btn" title="Suara aktif/nonaktif">🔊</button>
+        <button id="settingsBtn" class="icon-btn" title="Pengaturan">⚙️</button>
       </div>
     </div>
     <p class="tagline">Deteksi bencana real-time · Jalur evakuasi cerdas</p>
@@ -65,6 +67,31 @@
         <h2>Bencana Terdeteksi</h2>
         <button id="btn-refresh-disaster" class="btn-secondary btn-sm">↻ Refresh</button>
       </div>
+
+      <!-- Weather Card -->
+      <div id="weather-card" class="weather-card">
+        <div class="weather-icon" id="weather-icon">☀️</div>
+        <div class="weather-info">
+          <strong id="weather-temp">—°C</strong>
+          <p id="weather-desc">Memuat cuaca…</p>
+          <p class="weather-loc" id="weather-loc"></p>
+        </div>
+        <div class="weather-wind">
+          <span>💨</span>
+          <small id="weather-wind-val">— km/j</small>
+        </div>
+      </div>
+
+      <!-- Hazard Filter Chips -->
+      <div class="hazard-chips" id="hazard-chips">
+        <button class="chip chip-active" data-hazard="all">Semua</button>
+        <button class="chip" data-hazard="gempa">🌍 Gempa</button>
+        <button class="chip" data-hazard="tsunami">🌊 Tsunami</button>
+        <button class="chip" data-hazard="banjir">💧 Banjir</button>
+        <button class="chip" data-hazard="angin">🌬️ Angin</button>
+        <button class="chip" data-hazard="gunung">🌋 Gunung</button>
+      </div>
+
       <div id="disaster-list" class="card-list">
         <div class="loading-state"><span class="spinner"></span>Memuat data gempa…</div>
       </div>
@@ -250,6 +277,82 @@
   <div id="scan-cta-banner" class="scan-cta-banner hidden">
     <span>📷 Tekan untuk scan lingkungan & dapatkan rekomendasi berlindung</span>
     <button id="btn-auto-scan" class="btn-primary btn-sm">Scan Sekarang</button>
+  </div>
+
+  <!-- ── AI CHAT PANEL ──────────────────────────────────── -->
+  <div id="chat-panel" class="chat-panel hidden">
+    <div class="chat-header">
+      <span class="chat-avatar">🤖</span>
+      <h3>SelamatKu Assistant</h3>
+      <span id="ai-badge" class="chat-ai-badge local">Offline</span>
+      <button id="btn-close-chat" class="icon-btn">✕</button>
+    </div>
+    <div id="api-key-row" class="api-key-row hidden">
+      <label>🔑 ModelScope Key:</label>
+      <input type="password" id="ms-api-key-input" placeholder="sk-..." autocomplete="off" />
+      <button id="btn-save-ms-key">Simpan</button>
+    </div>
+    <div id="chat-messages" class="chat-messages">
+      <div class="chat-msg bot">
+        <p>Halo! Saya asisten keselamatan Anda. 😊<br>Tanyakan apa saja tentang keamanan, jalur evakuasi, atau tips darurat.</p>
+      </div>
+    </div>
+    <div class="chat-suggestions" id="chat-suggestions">
+      <button class="chip" data-q="Apa yang harus saya lakukan saat gempa?">🌍 Tips Gempa</button>
+      <button class="chip" data-q="Di mana tempat aman terdekat?">🏥 Tempat Aman</button>
+      <button class="chip" data-q="Bagaimana cara menghubungi keluarga saat darurat?">👥 Keluarga</button>
+    </div>
+    <div class="chat-input-row">
+      <input type="text" id="chat-input" placeholder="Tulis pertanyaan…" autocomplete="off" />
+      <button id="btn-send-chat" class="chat-send-btn" aria-label="Kirim">➤</button>
+    </div>
+  </div>
+  <button id="btn-open-chat" class="chat-fab hidden" aria-label="Buka chat AI">💬</button>
+
+  <!-- ── SETTINGS OVERLAY ───────────────────────────────── -->
+  <div id="settings-overlay" class="settings-overlay hidden">
+    <div class="settings-sheet">
+      <div class="settings-handle"></div>
+      <h2>⚙️ Pengaturan</h2>
+
+      <div class="setting-group">
+        <label>Tampilan</label>
+        <div class="setting-row">
+          <span>🌙 Mode Gelap</span>
+          <button id="toggle-dark" class="toggle-switch" role="switch" aria-checked="false"><span class="toggle-knob"></span></button>
+        </div>
+        <div class="setting-row">
+          <span>🔤 Ukuran Font</span>
+          <div class="font-toggle-group">
+            <button class="font-opt active" data-size="normal">A</button>
+            <button class="font-opt" data-size="large">A+</button>
+            <button class="font-opt" data-size="xl">A++</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="setting-group">
+        <label>Notifikasi & Suara</label>
+        <div class="setting-row">
+          <span>🔔 Notifikasi Push</span>
+          <button id="toggle-push" class="toggle-switch on" role="switch" aria-checked="true"><span class="toggle-knob"></span></button>
+        </div>
+        <div class="setting-row">
+          <span>🔊 Alarm Suara</span>
+          <button id="toggle-alarm" class="toggle-switch on" role="switch" aria-checked="true"><span class="toggle-knob"></span></button>
+        </div>
+      </div>
+
+      <div class="setting-group">
+        <label>Lokasi</label>
+        <div class="setting-row">
+          <span>📍 Ubah Posisi Manual</span>
+          <button id="btn-settings-change-pos" class="btn-secondary btn-sm">Ubah</button>
+        </div>
+      </div>
+
+      <button id="btn-close-settings" class="btn-primary btn-full" style="margin-top:16px">Selesai</button>
+    </div>
   </div>
 
   <!-- ── BOTTOM NAVIGATION ──────────────────────────────── -->

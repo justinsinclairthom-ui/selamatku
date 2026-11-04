@@ -27,90 +27,164 @@ function checkRateLimit(req) {
   return true;
 }
 
-// ── RULE-BASED FALLBACK ───────────────────────────────────────
-function ruleBasedAnalysis(disasterType, hasVisualContext) {
+// ── RULE-BASED FALLBACK (contextual with location) ───────────
+function ruleBasedAnalysis(disasterType, hasVisualContext, context) {
+  const loc = context ? context.replace('Lokasi: ', '') : '';
+  const isVideo = hasVisualContext;
+
   const rules = {
     gempa: {
       riskLevel: 'danger',
-      summary: hasVisualContext
-        ? 'Berdasarkan rekaman lingkungan, segera ambil posisi Drop-Cover-Hold.'
-        : 'Gempa terdeteksi! Segera lindungi diri Anda.',
+      summary: isVideo
+        ? `Dari rekaman lingkungan Anda${loc ? ' (' + loc + ')' : ''}: identifikasi struktur terlindung terdekat dan ambil posisi Drop-Cover-Hold SEKARANG.`
+        : `Gempa aktif${loc ? ' di area ' + loc : ''}. Ambil posisi melindungi diri segera.`,
       recommendations: [
-        { action: 'BERHENTI, LINDUNGI, BERPEGANGAN (Drop-Cover-Hold)', location: 'Di bawah meja/kursi kuat terdekat', priority: 1 },
-        { action: 'Jauhi jendela kaca, lemari tinggi, lampu gantung', location: 'Pindah ke area terbuka di ruangan', priority: 1 },
-        { action: 'Lindungi kepala dengan tangan/bantal/tas', location: 'Posisi Anda sekarang', priority: 2 },
-        { action: 'Setelah goncangan berhenti, keluar via jalur evakuasi', location: 'Pintu keluar terdekat', priority: 3 }
+        { action: 'DROP: Turunkan tubuh ke posisi merangkak/berlutut — JANGAN berdiri', location: 'Tanpa bergerak dari posisi Anda', priority: 1 },
+        { action: 'COVER: Selipkan diri di bawah meja/kursi terkuat yang Anda lihat di depan/samping Anda. Pegang kaki meja erat-erat', location: 'Meja/kursi terdekat (radius 1-2m dari Anda)', priority: 1 },
+        { action: 'JAUHI: Pindah minimal 2m menjauh dari jendela kaca, lemari >1.5m, lampu gantung, rak buku', location: 'Ke area dinding dalam (tanpa jendela) atau kolom beton', priority: 1 },
+        { action: 'HOLD: Berpegangan pada struktur sampai goncangan berhenti total (bisa 30-90 detik). Jangan keluar selama masih bergoncang', location: 'Posisi berlindung Anda', priority: 2 },
+        { action: 'SETELAH AMAN: Matikan gas/listrik jika bisa, keluar via tangga (JANGAN lift), kumpul di area terbuka 50m dari bangunan', location: 'Titik kumpul: lapangan/ruang terbuka terdekat (radius 50km: cari open space)', priority: 3 }
       ],
-      dangerZones: ['Jendela & kaca', 'Lemari/rak tinggi', 'Lampu gantung', 'Benda tergantung', 'Dengan bata ringan tanpa penguat'],
-      confidence: hasVisualContext ? 0.75 : 0.6
+      dangerZones: [
+        'Jendela & partisi kaca — risiko pecah & potong',
+        'Lemari/rak >1.5m — risiko roboh menimpa',
+        'Lampu gantung & plafon — risiko jatuh',
+        'D bata ringan/plafon gypsum — risiko runtuh',
+        'Kolom/struktur retak — indikasi kerusakan'
+      ],
+      nearestSafety: loc
+        ? `Cari titik kumpul/open space terdekat dari ${loc}. Dalam radius 50km: lapangan olahraga, alun-alun, parkiran luas tanpa gedung di sekeliling.`
+        : 'Area terbuka minimal 50m dari bangunan tertinggi di sekitar Anda.',
+      confidence: isVideo ? 0.75 : 0.6
     },
     tsunami: {
       riskLevel: 'danger',
-      summary: 'PERINGATAN TSUNAMI! Evakuasi MENDARAT ke tempat tinggi!',
+      summary: `ALERT TSUNAMI${loc ? ' — posisi Anda: ' + loc : ''}. Waktu evakuasi: 15-30 menit. Bergerak SEKARANG.`,
       recommendations: [
-        { action: 'SEGERA naik ke tempat tinggi (min. 15m dpl / 30m dari pantai)', location: 'Bukit/bangunan tinggi/escalator vertikal', priority: 1 },
-        { action: 'Jauhi pantai, sungai, muara, dan area rendah', location: 'Arah内陆/jauh dari air', priority: 1 },
-        { action: 'Jalan kaki lebih cepat daripada kendaraan saat panik', location: 'Jalur evakuasi vertikal (naik)', priority: 2 },
-        { action: 'Bawa HP + dokumen penting (maks 1 menit persiapan)', location: 'Tas/ransel Anda', priority: 3 }
+        { action: 'NAIK: Langsung menuju tempat dengan elevasi >15m dari permukaan laut ATAU jarak >30m horizontal dari pantai. Jika di gedung: naik ke lantai tertinggi', location: 'Bukit/bangunan tinggi/gedung bertingkat TERDEKAT dari posisi Anda', priority: 1 },
+        { action: 'JARAK: Jauhi SEMUA area air — pantai, sungai, muara, drainase besar. Air bisa datang dari arah mana saja', location: 'Arah JAUH dari garis pantai/sungai (vertical evacuation preferred)', priority: 1 },
+        { action: 'CEPAT: Jalan kaki > kendaraan (lalu lintas pasti macet/panik). Ikuti tanda panah evakuasi tsunami jika ada', location: 'Jalur evakuasi vertikal terdekat (biasanya ke atas/bukit)', priority: 2 },
+        { action: 'MINIMAL: Bawa hanya HP + dompet. Jangan buang waktu mengumpulkan barang. Maks 60 detik persiapan', location: 'Ambil dari saku/meja dekat Anda', priority: 3 }
       ],
-      dangerZones: ['Pantai & tepian air', 'Sungai/muara', 'Area depressed/rendah', 'Jembatan dekat perairan'],
+      dangerZones: [
+        'Garis pantai & area <30m dari air',
+        'Sungai, muara, kanal (air naik dari hulu)',
+        'Area cekungan/rendah (banjir bandang)',
+        'Jembatan & jalan dekat air (runtuh/dibawa arus)',
+        'Batu karang/tebing pantai (slump saat gelombang)'
+      ],
+      nearestSafety: loc
+        ? `Dari ${loc}, cari: (1) Bukit/gunung terdekat, (2) Gedung >5 lantai, (3) Tangga evakuasi tsunami. Radius 50km: identifikasi elevated road atau perbukitan.`
+        : 'Tempat tinggi terdekat: bukit, gedung tinggi (>5 lantai), atau tangga evakuasi bertanda.',
       confidence: 0.8
     },
     banjir: {
       riskLevel: 'caution',
-      summary: 'Waspada banjir! Pindah ke area yang lebih tinggi.',
+      summary: `Potensi banjir${loc ? ' di area ' + loc : ''}. Ketinggian air bisa naik 30-60cm/jam. Naik sekarang sebelum terlambat.`,
       recommendations: [
-        { action: 'Naik ke lantai atas atau atap bangunan', location: 'Lantai 2+ / rooftop / bukit', priority: 1 },
-        { action: 'Matikan listrik panel utama sebelum air naik', location: 'Panel MCB rumah', priority: 1 },
-        { action: 'Jangan warkat/kendarai di genangan (arus bawah berbahaya)', location: 'Hindari jalan tergenang', priority: 2 },
-        { action: 'Siapkan: obat, air minum, powerbank, dokumen', location: 'Tas darurat siap bawa', priority: 3 }
+        { action: 'NAIK: Pindah ke lantai 2+ atau atap. Jika di ruko: stok barang di lantai atas dulu (10 menit)', location: 'Lantai atas bangunan Anda / tangga ke rooftop', priority: 1 },
+        { action: 'MATIKAN: Cabut semua stopkontak, matikan MCB utama. Listrik + air = kematian', location: 'Panel listrik (biasal di dekat pintu masuk/lantai 1)', priority: 1 },
+        { action: 'HINDARI: JANGAN lewat genangan >30cm. Arus 15cm sudah bisa membalik motor, 30cm membalik mobil', location: 'Semua jalan/area tergenang — cari rute kering', priority: 2 },
+        { action: 'SIAPKAN: Tas berisi obat, air mineral x2, powerbank, dokumen foto di HP, senter', location: 'Letakkan di samping pintu keluar lantai atas', priority: 3 }
       ],
-      dangerZones: ['Genangan (arus bawah)', 'Kolam listrik', 'Area rendah', 'Bawah jembatan'],
+      dangerZones: [
+        'Genangan >15cm — arus bawah tidak terlihat',
+        'Kolam listrik, trafo, kabel putus',
+        'Balkon/terras lantai 1 (air langsung masuk)',
+        'Bawah jembatan (air terkonsentrasi)',
+        'Area tanah urugan (longsor saat jenuh)'
+      ],
+      nearestSafety: loc
+        ? `Dari ${loc}: cari bangunan >2 lantai dalam radius 200m. Alternatif 50km: area perbukitan atau gedung perkantoran tinggi.`
+        : 'Bangunan bertingkat terdekat (minimal 2 lantai) atau area elevated.',
       confidence: 0.7
     },
     angin: {
       riskLevel: 'caution',
-      summary: 'Angin kencang! Cari perlindungan di interior bangunan.',
+      summary: `Angin kencang/badai${loc ? ' di ' + loc : ''}. Risiko: benda terbang, kaca pecah, pohon tumbang. Masuk ke interior sekarang.`,
       recommendations: [
-        { action: 'Masuk ke ruangan tanpa jendela (lorong, kamar tengah)', location: 'Interior building / basement', priority: 1 },
-        { action: 'Jauhi kaca, pintu glass, papan reklame', location: 'Dinding dalam solid', priority: 1 },
-        { action: 'Tunduk rendah, lindungi kepala dengan lengan', location: 'Di bawah meja/bangku kokoh', priority: 2 },
-        { action: 'Jika outdoor: berbaring face-down di parit/turunan', location: 'Area rendah terbuka', priority: 3 }
+        { action: 'MASUK: Langsung ke ruangan paling dalam (tanpa jendela/pintu kaca). Lorong, kamar mandi, atau ruang tanpa kaca', location: 'Ruangan interior terdalam dari sisi angin', priority: 1 },
+        { action: 'TURUNKAN: Tutup semua jendela/pintu. Tarik tirai tebal sebagai lapisan tambahan anti pecah', location: 'Semua jendela yang masih terbuka', priority: 1 },
+        { action: 'RENDAH: Jika tidak bisa ke interior: berbaring prone (face down) di parit/turunan, lindungi kepala dengan lengan + tas', location: 'Area rendah terlindung dari arah angin', priority: 2 },
+        { action: 'JAUHI: Pohon besar, tiang listrik, reklame, spanduk, bangunan seng/prefab — semua bisa jadi peluru', location: 'Minimal 10m dari objek tersebut', priority: 3 }
       ],
-      dangerZones: ['Kaca & jendela', 'Reklame/spanduk', 'Pohon besar', 'Bangunan reyot', 'Tiang listrik'],
+      dangerZones: [
+        'Jendela & kaca (pecah → pecahan proyektil)',
+        'Papan reklame & spanduk (terbang)',
+        'Pohon besar (cabang patah/tumbang)',
+        'Atap seng/prefab (terangkat)',
+        'Tiang listrik & kabel (jatuh → listrik)'
+      ],
+      nearestSafety: loc
+        ? `Dari ${loc}: basement, bunker, atau ruangan interior gedung terdekat. Outdoor: parit/median jalan sebagai shelter sementara.`
+        : 'Interior bangunan tanpa kaca, atau area terlindung (di balik tembok beton).',
       confidence: 0.7
     },
     umum: {
       riskLevel: 'caution',
-      summary: 'Kondisi darurat. Tetap tenang dan cari tempat aman.',
+      summary: `Kondisi darurat terdeteksi${loc ? ' di ' + loc : ''}. Tetap tenang, amati, dan bergerak ke tempat aman.`,
       recommendations: [
-        { action: 'Tetap tenang, amati keadaan sekitar', location: 'Posisi Anda', priority: 1 },
-        { action: 'Identifikasi jalur keluar terdekat', location: 'Pintu/exit terdekat', priority: 1 },
-        { action: 'Lindungi kepala dari benda jatuh', location: 'Di bawah struktur kokoh', priority: 2 },
-        { action: 'Ikuti instruksi petugas/BPBD', location: '-', priority: 3 }
+        { action: 'AMATI: 5 detik — lihat ke segala arah. Identifikasi: apa bahayanya? Dari arah mana? Ada jalur keluar?', location: 'Posisi Anda sekarang', priority: 1 },
+        { action: 'GERAK: Arahkan diri ke pintu keluar/exit TERDEKAT. Jauhi sumber bahaya (jarak >5m)', location: 'Jalur keluar terdekat (bukan lift)', priority: 1 },
+        { action: 'LINDUNGI: Kepala selalu dilindungi (tangan, tas, benda keras di atas kepala)', location: 'Selama bergerak', priority: 2 },
+        { action: 'KUMPUL: Setelah di area aman, hubungi keluarga/kontak darurat. Laporkan kondisi', location: 'Titik kumpul / area terbuka', priority: 3 }
       ],
-      dangerZones: ['Benda berpotensi jatuh', 'Lantai rusak', 'Kerumunan'],
+      dangerZones: ['Sumber bahaya utama (identifikasi visual)', 'Jalur sempit/sumpek', 'Benda yang bisa jatuh'],
+      nearestSafety: 'Area terbuka tanpa struktur overhead, minimal 20m dari sumber bahaya.',
       confidence: 0.5
     }
   };
-  return rules[disasterType] || rules.umum;
+
+  const result = { ...(rules[disasterType] || rules.umum) };
+  // Add video context if applicable
+  if (isVideo) {
+    result.summary = `[Analisis video lingkungan] ` + result.summary;
+  }
+  return result;
 }
 
 // ── CLOUDFLARE WORKERS AI VISION ──────────────────────────────
 async function cloudflareVision(images, disasterType, context) {
-  // Use first image for analysis (Workers AI takes one image per request)
+  // Use first image for analysis
   const imageData = images[0];
   const base64Data = imageData.replace(/^data:image\/\w+;base64,/, '');
 
-  const prompt = `Analisis gambar lingkungan ini untuk persiapan menghadapi bencana ${disasterType.toUpperCase()} di Indonesia.
-${images.length > 1 ? `(Ini adalah frame dari video ${images.length} detik — lingkungan sekitar pengguna)` : ''}
+  const isVideo = images.length > 1;
+  const locationInfo = context || 'Lokasi tidak diketahui';
 
-Deskripsikan apa yang kamu lihat, lalu berikan rekomendasi berlindung spesifik.
+  const prompt = `Kamu analis keselamatan darurat. Lihat gambar ini PERHATI dan deskripsikan SETIAP objek yang terlihat SEBELUM memberikan rekomendasi.
 
-Balas HANYA JSON valid:
-{"riskLevel":"safe|caution|danger","summary":"Satu kalimat Bahasa Indonesia berdasarkan objek yang terlihat","recommendations":[{"action":"Apa yang harus dilakukan (spesifik基于objek di gambar)","location":"Di mana persisnya","priority":1}],"dangerZones":["Bahaya spesifik yang terlihat"],"confidence":0.85}
+JENIS BENCANA: ${disasterType.toUpperCase()}
+LOKASI PENGGUNA: ${locationInfo}
+RADIUS ANALISIS: 50 km dari posisi pengguna
+${isVideo ? `MODE: Video ${images.length} detik (lingkungan sekitar pengguna, arahkan kamera ke berbagai arah)` : 'MODE: Foto sekali'}
 
-Aturan: Semua teks Bahasa Indonesia. Maks 4 recommendations. Priority 1=paling urgent. Berbasis OBJEK YANG KAMU LIHAT di gambar (jika ada meja → sebutkan "di bawah meja tersebut", jika ada jendela → "jauhi jendela di sebelah ${'kiri/kanan'}").`;
+LANGKAH ANALISIS (ikuti urut):
+1. DAFTARKAN semua objek besar yang terlihat (meja, kursi, jendela, pintu, lemari, tiang, dinding, lantai, langit, bangunan, pohon, jalan, dll) — sebutkan POSISI relatifnya (depan, kiri, kanan, atas, jauh dekat)
+2. IDENTIFIKASI bahaya spesifik berdasarkan jenis bencana + objek yang ada
+3. BERIKAN rekomendasi yang MERUJUK objek spesifik yang kamu lihat (bukan generic)
+
+CONTOH SPESIFIK (bukan template):
+- JANGAN: "Cari tempat berlindung"
+- TAPI: "Bersembunyi di bawah meja kayu cokelat di depan Anda (sekitar 1m jarak)"
+- JANGAN: "Jauhi jendela"
+- TAPI: "Pindah 2m ke kanan, menjauh dari jendela kaca besar di sisi kiri ruangan"
+- JANGAN: "Cari tempat tinggi"
+- TAPI: "Naik ke lantai 2 melalui tangga besi di sudut kanan belakang"
+
+Balas HANYA JSON valid (tanpa markdown):
+{
+  "objectsSeen": ["objek1 di posisi X", "objek2 di posisi Y", ...],
+  "riskLevel": "safe|caution|danger",
+  "summary": "Deskripsi 1-2 kalimat: kondisi lingkungan + risiko utama berdasarkan objek spesifik",
+  "recommendations": [
+    {"action": "Tindakan spesifik merujuk objek di gambar", "location": "Posisi persis relatif terhadap pengguna", "priority": 1},
+    {"action": "...", "location": "...", "priority": 2}
+  ],
+  "dangerZones": ["Bahaya spesifik + posisi: 'Jendela kaca 2x1m di sisi kiri — risiko pecah'", ...],
+  "nearestSafety": "Deskripsi tempat aman terdekat dalam radius pandangan atau 50km (misal: 'Gedung 3 lantai di selatan ~2km' atau 'Meja beton di tengah ruangan')",
+  "confidence": 0.85
+}`;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
@@ -190,12 +264,9 @@ export default async function handler(req, res) {
     }
   }
 
-  // Fallback: rule-based
+  // Fallback: rule-based (with location context)
   if (!result) {
-    result = ruleBasedAnalysis(disasterType, frames.length > 0);
-    if (isVideo && frames.length > 1) {
-      result.summary = `[Video ${frames.length}s] ` + result.summary;
-    }
+    result = ruleBasedAnalysis(disasterType, frames.length > 0, context);
   }
 
   // Ensure structure
