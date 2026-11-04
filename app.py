@@ -2,93 +2,41 @@
 SelamatKu — Disaster Detection & Evacuation App
 Entry point for ModelScope Studio deployment.
 
-Serves the static PWA (index.html + app.js + style.css) via Gradio gr.HTML().
-Also exposes /api/analyze-safety endpoint for the AI safety scanner.
+Serves the static PWA files (index.html, style.css, app.js, icons, manifest,
+service-worker) AS-IS from the repo root via FastAPI. The frontend is a plain
+static site — Leaflet map tiles, external CDNs and relative asset paths all
+work because we serve real files instead of inlining them into gr.HTML().
+
+Also exposes POST /api/analyze-safety for the AI safety scanner. It tries
+Qwen-VL-Plus via DashScope when an API key is configured (DASHSCOPE_API_KEY or
+MS_API_KEY env vars, or sent by the client as msApiKey), otherwise falls back
+to a deterministic rule-based analysis so the feature always works offline.
 """
 
 import os
+import re
 import json
-import base64
 import urllib.request
-import urllib.error
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-
-import gradio as gr
+import uvicorn
 
 # ── Paths ──────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def _read_file(filename: str, default: str = "") -> str:
-    path = os.path.join(BASE_DIR, filename)
-    if os.path.isfile(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
-    return default
 
-
-# ── Load assets at import time ─────────────────────────────────
-HTML_TEMPLATE = _read_file("index.html")
-CSS_CONTENT   = _read_file("style.css")
-JS_CONTENT    = _read_file("app.js")
-
-
-def build_embedded_html() -> str:
-    """Inject CSS and JS inline into the HTML template so everything is self-contained."""
-    html = HTML_TEMPLATE
-
-    # Replace <link rel="stylesheet" href="style.css?v=5" /> with inline <style>
-    css_tag = f"<style>\n{CSS_CONTENT}\n</style>"
-    html = html.replace(
-        '<link rel="stylesheet" href="style.css?v=5" />',
-        css_tag
+def _get_api_key(body: dict) -> str:
+    """Resolve the DashScope API key: client-supplied first, then env vars."""
+    return (
+        body.get("msApiKey")
+        or os.environ.get("DASHSCOPE_API_KEY")
+        or os.environ.get("MS_API_KEY")
+        or ""
     )
 
-    # Replace <script src="app.js?v=3"></script> with inline <script>
-    js_tag = f"<script>\n{JS_CONTENT}\n</script>"
-    html = html.replace(
-        '<script src="app.js?v=3"></script>',
-        js_tag
-    )
 
-    # Fix icon paths (icons are in root, not icons/ subdir)
-    html = html.replace('href="icons/icon-192.png"', 'href="icon-192.png"')
-    html = html.replace('href="icons/maskable-192.png"', 'href="maskable-192.png"')
-
-    return html
-
-
-EMBEDDED_HTML = build_embedded_html() if HTML_TEMPLATE else """
-<!DOCTYPE html>
-<html lang="id">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>SelamatKu</title>
-  <style>
-    body { font-family: system-ui, sans-serif; background: #f4f6fb; color: #1a1d2e; }
-    .container { max-width: 480px; margin: 40px auto; padding: 24px; text-align: center; }
-    h1 { font-size: 2rem; margin-bottom: 8px; }
-    .badge { display: inline-block; background: #4f46e5; color: #fff; padding: 4px 12px; border-radius: 20px; font-size: .8rem; margin-top: 12px; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>🛡️ SelamatKu</h1>
-    <p>Aplikasi Deteksi &amp; Evakuasi Bencana</p>
-    <p style="color:#666;font-size:.9rem;margin-top:16px">
-      File index.html tidak ditemukan.<br/>
-      Pastikan semua file deploy ke root folder.
-    </p>
-    <span class="badge">ModelScope Deployment</span>
-  </div>
-</body>
-</html>
-"""
-
-
-# ── Rule-based analysis (same logic as analyze-safety.js) ─────
+# ── Rule-based analysis (mirrors the frontend fallback logic) ──
 def rule_based_analysis(disaster_type: str, has_visual_context: bool, context: str) -> dict:
     loc = context.replace("Lokasi: ", "") if context else ""
     is_video = has_visual_context
@@ -199,14 +147,9 @@ def rule_based_analysis(disaster_type: str, has_visual_context: bool, context: s
     return result
 
 
-# ── Qwen Vision via DashScope (optional, uses env var or MS key) ──
-async def qwen_vision_analysis(image_b64: str, disaster_type: str, context: str) -> dict | None:
+# ── Qwen Vision via DashScope (optional) ───────────────────────
+async def qwen_vision_analysis(image_b64: str, disaster_type: str, context: str, api_key: str):
     """Call Qwen-VL-Plus via DashScope API. Returns None on any failure."""
-    api_key = (
-        os.environ.get("DASHSCOPE_API_KEY")
-        or os.environ.get("MS_API_KEY")
-        or ""
-    )
     if not api_key or not image_b64:
         return None
 
@@ -256,7 +199,6 @@ async def qwen_vision_analysis(image_b64: str, disaster_type: str, context: str)
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        import re
         m = re.search(r"\{[\s\S]*\}", text)
         if m:
             result = json.loads(m.group())
@@ -268,15 +210,19 @@ async def qwen_vision_analysis(image_b64: str, disaster_type: str, context: str)
 
 
 # ── FastAPI app ────────────────────────────────────────────────
-fastapi_app = FastAPI(title="SelamatKu — Disaster Safety App")
+app = FastAPI(title="SelamatKu — Disaster Safety App")
 
 
-@fastapi_app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse)
 async def index():
-    return HTMLResponse(EMBEDDED_HTML)
+    path = os.path.join(BASE_DIR, "index.html")
+    if os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return HTMLResponse(f.read())
+    return HTMLResponse("<h1>SelamatKu</h1><p>index.html tidak ditemukan.</p>")
 
 
-@fastapi_app.post("/api/analyze-safety")
+@app.post("/api/analyze-safety")
 async def analyze_safety(request: Request):
     body = await request.json()
     images = body.get("images", [])
@@ -287,14 +233,13 @@ async def analyze_safety(request: Request):
 
     frames = images if isinstance(images, list) else ([image] if image else [])
 
-    # Try Qwen Vision first (if API key available)
+    # Try Qwen Vision first (if an API key is available)
     result = None
     if frames:
         first_frame = frames[0]
-        # Strip data URL prefix
         if first_frame.startswith("data:image"):
             first_frame = first_frame.split(",", 1)[1]
-        result = await qwen_vision_analysis(first_frame, disaster_type, context)
+        result = await qwen_vision_analysis(first_frame, disaster_type, context, _get_api_key(body))
 
     # Fallback to rule-based
     if not result:
@@ -304,56 +249,12 @@ async def analyze_safety(request: Request):
     return JSONResponse(result)
 
 
-# Mount static files (icons, manifest, service-worker, etc.)
-static_dir = os.path.join(BASE_DIR, "static")
-os.makedirs(static_dir, exist_ok=True)
-# Copy needed static files to static/ dir if they exist in root
-for fname in ["manifest.json", "service-worker.js",
-              "icon-192.png", "icon-512.png",
-              "maskable-192.png", "maskable-512.png"]:
-    src = os.path.join(BASE_DIR, fname)
-    dst = os.path.join(static_dir, fname)
-    if os.path.isfile(src) and not os.path.isfile(dst):
-        import shutil
-        shutil.copy2(src, dst)
-
-fastapi_app.mount("/static", StaticFiles(directory=static_dir), name="static")
+# Mount everything else (style.css, app.js, icons, manifest, service-worker…)
+# at the root so relative paths in index.html resolve correctly.
+app.mount("/", StaticFiles(directory=BASE_DIR, html=True), name="static")
 
 
-# ── Gradio UI ──────────────────────────────────────────────────
-def build_gradio() -> gr.Blocks:
-    with gr.Blocks(
-        title="SelamatKu — AI Safety Scanner",
-        theme=gr.themes.Soft(),
-        css="""
-          body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-          .sk-header {
-            background: linear-gradient(135deg, #3730a3, #4f46e5, #818cf8);
-            color: #fff;
-            padding: 20px 24px;
-            border-radius: 0 0 20px 20px;
-          }
-          .sk-header h1 { margin: 0; font-size: 1.5rem; font-weight: 800; }
-          .sk-header p { margin: 4px 0 0; opacity: .8; font-size: .85rem; }
-          .sk-fullscreen { width: 100%; height: 100vh; border: none !important; border-radius: 0 !important; }
-        """,
-    ) as demo:
-        gr.HTML("""
-        <div class="sk-header">
-          <h1>🛡️ SelamatKu — Deteksi & Evakuasi Bencana</h1>
-          <p>AI Safety Scanner · Qwen Vision · ModelScope</p>
-        </div>
-        """)
-
-        gr.HTML(EMBEDDED_HTML)
-
-    return demo
-
-
-demo = build_gradio()
-
-# Attach FastAPI routes to Gradio's underlying FastAPI app
-demo.app = fastapi_app
-
+# ── Launch ─────────────────────────────────────────────────────
+# ModelScope expects the server bound to 0.0.0.0:7860.
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    uvicorn.run(app, host="0.0.0.0", port=7860)

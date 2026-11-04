@@ -756,9 +756,9 @@ async function analyzeScene(frames) {
     if (result) result.source = 'modelscope-qwen';
   }
 
-  // Priority 2: Vercel serverless API (Cloudflare AI or rule-based)
-  // Note: This only works on Vercel. On ModelScope it will fail silently → falls to Priority 3.
-  if (!result && location.hostname !== 'localhost' && location.hostname.includes('vercel')) {
+  // Priority 2: Server-side API (ModelScope /api/analyze-safety or Vercel).
+  // On localhost there is no backend, so this is skipped and we fall to rule-based.
+  if (!result && location.hostname !== 'localhost') {
     try {
       if (hintEl) hintEl.textContent = '📡 Mengirim ke server…';
       const resp = await fetch('/api/analyze-safety', {
@@ -768,14 +768,15 @@ async function analyzeScene(frames) {
           images: framesToSend,
           disasterType: selectedDisasterType,
           isVideo,
-          context
+          context,
+          msApiKey: localStorage.getItem('ms_api_key') || ''
         })
       });
       if (resp.ok) {
         result = await resp.json();
       }
     } catch(e) {
-      console.warn('[Scanner] Vercel API unavailable:', e.message);
+      console.warn('[Scanner] Server API unavailable:', e.message);
     }
   }
 
