@@ -2,15 +2,12 @@
 SelamatKu — Disaster Detection & Evacuation App
 Entry point for ModelScope Studio deployment.
 
-Serves the static PWA files (index.html, style.css, app.js, icons, manifest,
-service-worker) AS-IS from the repo root via FastAPI. The frontend is a plain
-static site — Leaflet map tiles, external CDNs and relative asset paths all
-work because we serve real files instead of inlining them into gr.HTML().
+Strategy: Serve the PWA as a pure static site via FastAPI. The root URL (/)
+returns index.html directly, all assets (CSS, JS, icons, manifest) are served
+from the repo root. A minimal Gradio demo is attached so ModelScope's harness
+is satisfied, but users will see the full PWA when they open the space URL.
 
-Also exposes POST /api/analyze-safety for the AI safety scanner. It tries
-Qwen-VL-Plus via DashScope when an API key is configured (DASHSCOPE_API_KEY or
-MS_API_KEY env vars, or sent by the client as msApiKey), otherwise falls back
-to a deterministic rule-based analysis so the feature always works offline.
+The AI safety scanner endpoint POST /api/analyze-safety is also exposed here.
 """
 
 import os
@@ -27,7 +24,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _get_api_key(body: dict) -> str:
-    """Resolve the DashScope API key: client-supplied first, then env vars."""
     return (
         body.get("msApiKey")
         or os.environ.get("DASHSCOPE_API_KEY")
@@ -36,7 +32,7 @@ def _get_api_key(body: dict) -> str:
     )
 
 
-# ── Rule-based analysis (mirrors the frontend fallback logic) ──
+# ── Rule-based analysis ────────────────────────────────────────
 def rule_based_analysis(disaster_type: str, has_visual_context: bool, context: str) -> dict:
     loc = context.replace("Lokasi: ", "") if context else ""
     is_video = has_visual_context
@@ -147,13 +143,11 @@ def rule_based_analysis(disaster_type: str, has_visual_context: bool, context: s
     return result
 
 
-# ── Qwen Vision via DashScope (optional) ───────────────────────
+# ── Qwen Vision via DashScope ──────────────────────────────────
 async def qwen_vision_analysis(image_b64: str, disaster_type: str, context: str, api_key: str):
-    """Call Qwen-VL-Plus via DashScope API. Returns None on any failure."""
     if not api_key or not image_b64:
         return None
 
-    # Strip data URL prefix if present
     if image_b64.startswith("data:image"):
         image_b64 = image_b64.split(",", 1)[1]
 
@@ -233,7 +227,6 @@ async def analyze_safety(request: Request):
 
     frames = images if isinstance(images, list) else ([image] if image else [])
 
-    # Try Qwen Vision first (if an API key is available)
     result = None
     if frames:
         first_frame = frames[0]
@@ -241,7 +234,6 @@ async def analyze_safety(request: Request):
             first_frame = first_frame.split(",", 1)[1]
         result = await qwen_vision_analysis(first_frame, disaster_type, context, _get_api_key(body))
 
-    # Fallback to rule-based
     if not result:
         result = rule_based_analysis(disaster_type, len(frames) > 0, context)
 
@@ -249,12 +241,10 @@ async def analyze_safety(request: Request):
     return JSONResponse(result)
 
 
-# Mount everything else (style.css, app.js, icons, manifest, service-worker…)
-# at the root so relative paths in index.html resolve correctly.
+# Mount static files at root (style.css, app.js, icons, manifest, etc.)
 app.mount("/", StaticFiles(directory=BASE_DIR, html=True), name="static")
 
 
 # ── Launch ─────────────────────────────────────────────────────
-# ModelScope expects the server bound to 0.0.0.0:7860.
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=7860)
