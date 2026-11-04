@@ -414,17 +414,24 @@ function formatDate(ts) {
 function initMap() {
   state.map = L.map('map').setView([-6.2, 106.8], 13);
 
-  // Primary: OpenStreetMap (no API key needed)
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-    maxZoom: 19
+  // Primary: CARTO dark tiles (no API key, no regional blocking)
+  const cartoLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    maxZoom: 19,
+    subdomains: 'abcd'
   }).addTo(state.map);
 
-  // Alternative dark theme (uncomment if you prefer dark map):
-  // L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', {
-  //   attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
-  //   maxZoom: 19
-  // }).addTo(state.map);
+  // Fallback: if CARTO fails, try standard OSM tiles
+  cartoLayer.on('tileerror', function() {
+    if (!state._osmFallbackTried) {
+      state._osmFallbackTried = true;
+      state.map.removeLayer(cartoLayer);
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        maxZoom: 19
+      }).addTo(state.map);
+    }
+  });
 
   // Always start real-time GPS watch
   // If saved position exists, show it immediately while GPS loads
@@ -565,13 +572,159 @@ function captureFrame() {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 /** Analyze scene — accepts single frame string or array of frames (video) */
+// ── RULE-BASED FALLBACK (embedded — works offline / no API key) ──
+function ruleBasedAnalysis(disasterType, isVideo, context) {
+  const loc = context ? context.replace('Lokasi: ', '') : '';
+  const rules = {
+    gempa: {
+      riskLevel: 'danger',
+      summary: isVideo
+        ? `Dari rekaman lingkungan Anda${loc ? ' ('+loc+')' : ''}: ambil posisi Drop-Cover-Hold SEKARANG.`
+        : `Gempa aktif${loc ? ' di area '+loc : ''}. Ambil posisi melindungi diri segera.`,
+      recommendations: [
+        { action: 'DROP: Turunkan tubuh ke posisi merangkak/berlutut — JANGAN berdiri', location: 'Tanpa bergerak dari posisi Anda', priority: 1 },
+        { action: 'COVER: Selipkan diri di bawah meja/kursi terkuat yang Anda lihat. Pegang kaki meja erat-erat', location: 'Meja/kursi terdekat (radius 1-2m)', priority: 1 },
+        { action: 'JAUHI: Pindah minimal 2m menjauh dari jendela kaca, lemari >1.5m, lampu gantung', location: 'Ke area dinding dalam (tanpa jendela)', priority: 1 },
+        { action: 'HOLD: Berpegangan pada struktur sampai goncangan berhenti total', location: 'Posisi berlindung Anda', priority: 2 },
+        { action: 'SETELAH AMAN: Matikan gas/listrik jika bisa, keluar via tangga (JANGAN lift)', location: 'Titik kumpul: area terbuka terdekat', priority: 3 }
+      ],
+      dangerZones: ['Jendela & partisi kaca','Lemari/rak >1.5m','Lampu gantung & plafon','D bata ringan/plafon gypsum'],
+      nearestSafety: 'Area terbuka minimal 50m dari bangunan tertinggi.',
+      confidence: isVideo ? 0.75 : 0.6
+    },
+    tsunami: {
+      riskLevel: 'danger',
+      summary: `ALERT TSUNAMI${loc ? ' — posisi: '+loc : ''}. Bergerak SEKARANG.`,
+      recommendations: [
+        { action: 'NAIK: Menuju elevasi >15m dari permukaan laut ATAU jarak >30m dari pantai', location: 'Bukit/bangunan tinggi TERDEKAT', priority: 1 },
+        { action: 'JARAK: Jauhi SEMUA area air — pantai, sungai, muara', location: 'Arah JAUH dari garis pantai', priority: 1 },
+        { action: 'CEPAT: Jalan kaki > kendaraan. Ikuti tanda panah evakuasi tsunami', location: 'Jalur evakuasi vertikal terdekat', priority: 2 },
+        { action: 'MINIMAL: Bawa hanya HP + dompet. Maks 60 detik persiapan', location: 'Ambil dari saku/meja dekat Anda', priority: 3 }
+      ],
+      dangerZones: ['Garis pantai & area <30m dari air','Sungai, muara, kanal','Area cekungan/rendah','Jembatan dekat air'],
+      nearestSafety: 'Tempat tinggi: bukit, gedung >5 lantai, atau tangga evakuasi bertanda.',
+      confidence: 0.8
+    },
+    banjir: {
+      riskLevel: 'caution',
+      summary: `Potensi banjir${loc ? ' di '+loc : ''}. Naik sekarang sebelum terlambat.`,
+      recommendations: [
+        { action: 'NAIK: Pindah ke lantai 2+ atau atap', location: 'Lantai atas / tangga ke rooftop', priority: 1 },
+        { action: 'MATIKAN: Cabut semua stopkontak, matikan MCB utama. Listrik + air = bahaya', location: 'Panel listrik (dekat pintu masuk)', priority: 1 },
+        { action: 'HINDARI: JANGAN lewat genangan >30cm. Arus 15cm sudah membalik motor', location: 'Semua jalan tergenang — cari rute kering', priority: 2 },
+        { action: 'SIAPKAN: Tas berisi obat, air mineral, powerbank, dokumen foto', location: 'Samping pintu keluar lantai atas', priority: 3 }
+      ],
+      dangerZones: ['Genangan >15cm','Kolam listrik, trafo, kabel putus','Balkon lantai 1','Bawah jembatan'],
+      nearestSafety: 'Bangunan bertingkat terdekat (minimal 2 lantai).',
+      confidence: 0.7
+    },
+    angin: {
+      riskLevel: 'caution',
+      summary: `Angin kencang${loc ? ' di '+loc : ''}. Risiko: benda terbang, kaca pecah. Masuk ke interior sekarang.`,
+      recommendations: [
+        { action: 'MASUK: Ke ruangan paling dalam (tanpa jendela/pintu kaca)', location: 'Ruangan interior terdalam', priority: 1 },
+        { action: 'TURUNKAN: Tutup semua jendela. Tarik tirai tebal sebagai lapisan tambahan', location: 'Semua jendela terbuka', priority: 1 },
+        { action: 'RENDAH: Jika outdoor: berbaring prone di parit/turunan, lindungi kepala', location: 'Area rendah terlindung dari arah angin', priority: 2 },
+        { action: 'JAUHI: Pohon besar, tiang listrik, reklame, bangunan seng', location: 'Minimal 10m dari objek tersebut', priority: 3 }
+      ],
+      dangerZones: ['Jendela & kaca','Papan reklame & spanduk','Pohon besar','Atap seng/prefab','Tiang listrik'],
+      nearestSafety: 'Interior bangunan tanpa kaca, atau area di balik tembok beton.',
+      confidence: 0.7
+    },
+    umum: {
+      riskLevel: 'caution',
+      summary: `Kondisi darurat terdeteksi${loc ? ' di '+loc : ''}. Tetap tenang, amati, bergerak ke tempat aman.`,
+      recommendations: [
+        { action: 'AMATI: 5 detik — lihat ke segala arah. Identifikasi bahaya & jalur keluar', location: 'Posisi Anda sekarang', priority: 1 },
+        { action: 'GERAK: Arahkan ke pintu keluar/exit TERDEKAT. Jauhi sumber bahaya >5m', location: 'Jalur keluar terdekat (bukan lift)', priority: 1 },
+        { action: 'LINDUNGI: Kepala selalu dilindungi (tangan, tas, benda keras)', location: 'Selama bergerak', priority: 2 },
+        { action: 'KUMPUL: Setelah aman, hubungi keluarga. Laporkan kondisi', location: 'Titik kumpul / area terbuka', priority: 3 }
+      ],
+      dangerZones: ['Sumber bahaya utama','Jalur sempit/sumpek','Benda yang bisa jatuh'],
+      nearestSafety: 'Area terbuka tanpa struktur overhead, minimal 20m dari sumber bahaya.',
+      confidence: 0.5
+    }
+  };
+  return { ...(rules[disasterType] || rules.umum) };
+}
+
+// ── MODELSCOPE QWEN VISION (direct from browser) ─────────────
+async function modelScopeVision(frames, disasterType, context) {
+  const apiKey = localStorage.getItem('ms_api_key');
+  if (!apiKey) return null;
+
+  const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+  const model   = 'qwen-vl-plus'; // vision model
+  const isVideo = frames.length > 1;
+  const locInfo = context || 'Lokasi tidak diketahui';
+
+  // Use only first frame for vision (saves tokens)
+  const imageDataUrl = frames[0];
+
+  const prompt = `Kamu analis keselamatan darurat Indonesia. Lihat gambar ini PERHATI.
+
+JENIS BENCANA: ${disasterType.toUpperCase()}
+LOKASI PENGGUNA: ${locInfo}
+MODE: ${isVideo ? `Video ${frames.length} frame` : 'Foto sekali'}
+
+LANGKAH:
+1. DAFTARKAN semua objek besar yang terlihat (meja, kursi, jendela, pintu, lemari, tiang, dinding, pohon, jalan, dll) — sebutkan POSISI relatifnya
+2. IDENTIFIKASI bahaya spesifik berdasarkan jenis bencana + objek
+3. BERIKAN rekomendasi SPESIFIK merujuk objek yang kamu lihat (bukan generic)
+
+Balas HANYA JSON valid:
+{"objectsSeen":["objek1 di posisi X"],"riskLevel":"safe|caution|danger","summary":"1-2 kalimat kondisi + risiko","recommendations":[{"action":"Tindakan spesifik","location":"Posisi relatif","priority":1}],"dangerZones":["Bahaya + posisi"],"nearestSafety":"Tempat aman terdekat","confidence":0.85}`;
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: imageDataUrl } },
+            { type: 'text', text: prompt }
+          ]
+        }],
+        max_tokens: 1024,
+        temperature: 0.3
+      }),
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      console.warn('[ModelScope Vision] API error:', res.status);
+      return null;
+    }
+    const data = await res.json();
+    const text = data.choices?.[0]?.message?.content || '';
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+    return JSON.parse(jsonMatch[0]);
+
+  } catch(e) {
+    console.warn('[ModelScope Vision] failed:', e.message);
+    return null;
+  }
+}
+
+// ── ANALYZE SCENE (orchestrator) ─────────────────────────────
 async function analyzeScene(frames) {
   // Normalize to array
   if (typeof frames === 'string') frames = [frames];
 
   const loadingEl = document.getElementById('scanner-loading');
   const resultsEl = document.getElementById('scanner-results');
-  const hintEl = document.getElementById('scanner-hint');
+  const hintEl    = document.getElementById('scanner-hint');
 
   // Visual flash
   const video = document.getElementById('scanner-video');
@@ -585,48 +738,60 @@ async function analyzeScene(frames) {
   const isVideo = frames.length > 1;
   if (hintEl) hintEl.textContent = isVideo ? `📤 Menganalisis ${frames.length} frame…` : '📤 Menganalisis…';
 
-  try {
-    // Send only first and last frame for video (saves bandwidth)
-    // Or all frames if ≤ 3
-    const framesToSend = frames.length <= 3 ? frames : [frames[0], frames[Math.floor(frames.length/2)], frames[frames.length-1]];
+  const context = state.userPos
+    ? `Lokasi: ${state.userPos.lat.toFixed(4)}, ${state.userPos.lng.toFixed(4)}`
+    : '';
 
-    console.log(`[Scanner] Sending ${framesToSend.length} frame(s), total size:`,
-      Math.round(framesToSend.reduce((s, f) => s + f.length, 0) / 1024) + 'KB');
+  // Pick which frames to send (max 3 for bandwidth)
+  const framesToSend = frames.length <= 3
+    ? frames
+    : [frames[0], frames[Math.floor(frames.length/2)], frames[frames.length-1]];
 
-    const resp = await fetch('/api/analyze-safety', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        images: framesToSend, // array of base64 data URLs
-        disasterType: selectedDisasterType,
-        isVideo: isVideo,
-        context: state.userPos ? `Lokasi: ${state.userPos.lat.toFixed(4)}, ${state.userPos.lng.toFixed(4)}` : ''
-      })
-    });
+  let result = null;
 
-    console.log('[Scanner] Response:', resp.status);
-
-    if (!resp.ok) {
-      let errMsg = `Server error (${resp.status})`;
-      try { const e = await resp.json(); errMsg = e.error || errMsg; } catch(ex) {}
-      throw new Error(errMsg);
-    }
-
-    const result = await resp.json();
-    console.log('[Scanner] Result:', JSON.stringify(result).substring(0, 200));
-    renderSafetyResult(result);
-
-  } catch (err) {
-    console.error('[Scanner] Error:', err);
-    loadingEl.classList.add('hidden');
-    if (hintEl) hintEl.textContent = 'Tekan & tahan untuk rekam, atau tap untuk foto';
-
-    let userMsg = err.message;
-    if (err.name === 'TypeError' || err.message.includes('fetch')) userMsg = 'Koneksi terputus. Periksa internet.';
-    else if (err.message.includes('429')) userMsg = 'Terlalu banyak scan. Tunggu 1 menit.';
-
-    showInAppAlert('❌ Gagal Analisis', userMsg + '\n\nCoba perbaiki pencahayaan dan retry.');
+  // Priority 1: ModelScope Qwen Vision (if API key set)
+  if (localStorage.getItem('ms_api_key')) {
+    if (hintEl) hintEl.textContent = '🤖 AI sedang menganalisis lingkungan…';
+    result = await modelScopeVision(framesToSend, selectedDisasterType, context);
+    if (result) result.source = 'modelscope-qwen';
   }
+
+  // Priority 2: Vercel serverless API (Cloudflare AI or rule-based)
+  // Note: This only works on Vercel. On ModelScope it will fail silently → falls to Priority 3.
+  if (!result && location.hostname !== 'localhost' && location.hostname.includes('vercel')) {
+    try {
+      if (hintEl) hintEl.textContent = '📡 Mengirim ke server…';
+      const resp = await fetch('/api/analyze-safety', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          images: framesToSend,
+          disasterType: selectedDisasterType,
+          isVideo,
+          context
+        })
+      });
+      if (resp.ok) {
+        result = await resp.json();
+      }
+    } catch(e) {
+      console.warn('[Scanner] Vercel API unavailable:', e.message);
+    }
+  }
+
+  // Priority 3: Embedded rule-based (always works, no network needed)
+  if (!result) {
+    result = ruleBasedAnalysis(selectedDisasterType, isVideo, context);
+    result.source = 'rule-based';
+  }
+
+  // Ensure structure
+  if (!result.riskLevel) result.riskLevel = 'caution';
+  if (!Array.isArray(result.recommendations)) result.recommendations = [];
+  if (!Array.isArray(result.dangerZones)) result.dangerZones = [];
+  if (result.confidence == null) result.confidence = 0.5;
+
+  renderSafetyResult(result);
 }
 
 function renderSafetyResult(result) {
@@ -687,7 +852,7 @@ function renderSafetyResult(result) {
 
   // Confidence + source
   const conf = result.confidence != null ? Math.round(result.confidence * 100) : null;
-  const srcLabel = result.source === 'cloudflare-ai' ? 'AI Vision' : 'Rule Engine';
+  const srcLabel = result.source === 'modelscope-qwen' ? 'Qwen Vision AI' : result.source === 'cloudflare-ai' ? 'Cloudflare AI' : 'Rule Engine';
   document.getElementById('result-confidence').textContent =
     `${srcLabel} · Confidence: ${conf || '?'}%${result.framesAnalyzed > 1 ? ` · ${result.framesAnalyzed} frame dianalisis` : ''}`;
 
